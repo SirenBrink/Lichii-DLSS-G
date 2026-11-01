@@ -9,6 +9,7 @@
 #include <functional>
 #include <list>
 #include <mutex>
+#include <utility>
 
 #include "common/common_types.h"
 
@@ -40,13 +41,13 @@ public:
     template <typename Func>
     ActionHandle RegisterGuestAction(u32 syncpoint_id, u32 expected_value, Func&& action) {
         return RegisterAction(syncpoints_guest[syncpoint_id], guest_action_storage[syncpoint_id],
-                              expected_value, std::move(action));
+                              expected_value, std::forward<Func>(action));
     }
 
     template <typename Func>
     ActionHandle RegisterHostAction(u32 syncpoint_id, u32 expected_value, Func&& action) {
         return RegisterAction(syncpoints_host[syncpoint_id], host_action_storage[syncpoint_id],
-                              expected_value, std::move(action));
+                              expected_value, std::forward<Func>(action));
     }
 
     void DeregisterGuestAction(u32 syncpoint_id, const ActionHandle& handle);
@@ -75,7 +76,7 @@ private:
 
     ActionHandle RegisterAction(std::atomic<u32>& syncpoint,
                                 std::list<RegisteredAction>& action_storage, u32 expected_value,
-                                std::function<void()>&& action);
+                                std::function<void()> action);
 
     void DeregisterAction(std::list<RegisteredAction>& action_storage, const ActionHandle& handle);
 

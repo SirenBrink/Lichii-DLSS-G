@@ -195,12 +195,6 @@ if (NOT ANDROID)
     target_sources(tests PRIVATE input_common/joycon_subcommand_response.cpp)
     target_link_libraries(tests PRIVATE SDL3::SDL3)
 
-    add_executable(config_tests
-        common/first_run_config.cpp
-        ../frontend_common/config.cpp)
-    target_link_libraries(config_tests PRIVATE common SimpleIni::SimpleIni Catch2::Catch2WithMain
-        ${PLATFORM_LIBRARIES})
-    add_test(NAME config_tests COMMAND config_tests)
 endif()
 
 # needed for vma

@@ -19,7 +19,6 @@ namespace {
 constexpr std::array<u64, 5> calls_order{{2, 0, 1, 4, 3}};
 std::array<s64, 5> delays{};
 std::bitset<5> callbacks_ran_flags;
-u64 expected_callback = 0;
 
 template <unsigned int IDX>
 std::optional<std::chrono::nanoseconds> HostCallbackTemplate(s64 time,
@@ -27,7 +26,6 @@ std::optional<std::chrono::nanoseconds> HostCallbackTemplate(s64 time,
     static_assert(IDX < callbacks_ran_flags.size(), "IDX out of range");
     callbacks_ran_flags.set(IDX);
     delays[IDX] = ns_late.count();
-    ++expected_callback;
     return std::nullopt;
 }
 
@@ -35,7 +33,6 @@ struct ScopeInit final {
     ScopeInit() {
         callbacks_ran_flags.reset();
         delays.fill(0);
-        expected_callback = 0;
         core_timing.SetMulticore(true);
         core_timing.Initialize([]() {});
     }
@@ -66,7 +63,6 @@ TEST_CASE("CoreTiming[BasicOrder]", "[core]") {
         Core::Timing::CreateEvent("callbackE", HostCallbackTemplate<4>),
     };
 
-    expected_callback = 0;
     callbacks_ran_flags.reset();
 
     core_timing.SyncPause(true);
@@ -110,7 +106,6 @@ TEST_CASE("CoreTiming[BasicOrderNoPausing]", "[core]") {
     core_timing.SyncPause(true);
     core_timing.SyncPause(false);
 
-    expected_callback = 0;
     callbacks_ran_flags.reset();
 
     const u64 start = core_timing.GetGlobalTimeNs().count();

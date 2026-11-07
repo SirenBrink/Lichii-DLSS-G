@@ -71,6 +71,8 @@ public:
     }
 
 private:
+    friend struct SyncpointManagerTestAccess;
+
     void Increment(std::atomic<u32>& syncpoint, std::condition_variable& wait_cv,
                    std::list<RegisteredAction>& action_storage);
 

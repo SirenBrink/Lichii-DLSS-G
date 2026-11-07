@@ -8,6 +8,18 @@
 #include <catch2/generators/catch_generators.hpp>
 #include "video_core/host1x/syncpoint_manager.h"
 
+namespace Tegra::Host1x {
+
+struct SyncpointManagerTestAccess {
+    // Registration rejects empty actions. Seed both queues to exercise the dispatch safeguard.
+    static void QueueEmptyCallbacks(SyncpointManager& manager) {
+        manager.guest_action_storage[0].emplace_back(1, ++manager.last_action_id, std::function<void()>{});
+        manager.host_action_storage[0].emplace_back(1, ++manager.last_action_id, std::function<void()>{});
+    }
+};
+
+} // namespace Tegra::Host1x
+
 TEST_CASE("SyncpointManager preserves reusable callbacks", "[video_core][syncpoint]") {
     Tegra::Host1x::SyncpointManager manager;
     const bool host = GENERATE(false, true);
@@ -76,11 +88,7 @@ TEST_CASE("SyncpointManager ignores empty callbacks", "[video_core][syncpoint]")
 TEST_CASE("SyncpointManager retires empty stored callbacks", "[video_core][syncpoint]") {
     Tegra::Host1x::SyncpointManager manager;
     int calls = 0;
-    const auto guest = manager.RegisterGuestAction(0, 1, [&] { ++calls; });
-    const auto host = manager.RegisterHostAction(0, 1, [&] { ++calls; });
-    // Exercise the dispatch guard independently of registration validation.
-    guest->action = {};
-    host->action = {};
+    Tegra::Host1x::SyncpointManagerTestAccess::QueueEmptyCallbacks(manager);
     manager.RegisterGuestAction(0, 1, [&] { ++calls; });
     manager.RegisterHostAction(0, 1, [&] { ++calls; });
     REQUIRE_NOTHROW(manager.IncrementGuest(0));

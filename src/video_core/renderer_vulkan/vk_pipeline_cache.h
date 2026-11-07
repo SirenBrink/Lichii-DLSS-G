@@ -171,7 +171,7 @@ private:
         std::chrono::steady_clock::time_point last_log{};
     } clean;
 
-    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
+    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
@@ -227,6 +227,10 @@ private:
     /// for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};
+    /// GPU-thread time spent waiting for skippable native draws this frame, in microseconds.
+    s64 native_frame_wait_us{};
+    std::chrono::steady_clock::time_point native_wait_log_start{std::chrono::steady_clock::now()};
+    s64 native_wait_used_us{}; ///< Budget spent since the last 10 s log line.
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 

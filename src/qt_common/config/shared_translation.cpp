@@ -281,6 +281,14 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, native_async_draws, tr("Switch 2 draws with unbuilt pipelines:"),
+           tr("When asynchronous shader building is enabled, Wait draws every object once its "
+              "pipeline is ready. Skip can hide objects temporarily while their pipelines build. "
+              "Bounded wait gives eligible draws a shared time budget per frame. "
+              "EDEN_NX2_ASYNC_DISCARD=0 forces Wait and 1 forces Skip."));
+    INSERT(Settings, native_pipeline_wait_ms, tr("Pipeline wait per frame (ms):"),
+           tr("Total time Bounded wait can spend on draws that are eligible to be skipped. "
+              "Lighting and other protected passes still wait for their pipelines."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "
@@ -674,6 +682,12 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                           {
                               PAIR(ConsoleMode, Docked, tr("Docked")),
                               PAIR(ConsoleMode, Handheld, tr("Handheld")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::NativeAsyncDraws>::Index(),
+                          {
+                              PAIR(NativeAsyncDraws, Wait, tr("Wait")),
+                              PAIR(NativeAsyncDraws, Bounded, tr("Bounded wait")),
+                              PAIR(NativeAsyncDraws, Skip, tr("Skip")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::CpuClock>::Index(),
                           {

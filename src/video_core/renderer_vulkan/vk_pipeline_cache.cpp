@@ -1625,6 +1625,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
 
 void PipelineCache::TickFrame() {
     ++frame_count;
+    native_frame_wait_us = 0;
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -1722,29 +1723,55 @@ void PipelineCache::StopBackgroundPipelines() {
     background_workers.reset();
 }
 
-GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) const noexcept {
+GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexcept {
     if (pipeline->IsBuilt()) {
         return pipeline;
     }
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    // Native draws whose pipeline is still building are skipped instead of waited for (the
-    // object is missing for a frame or more rather than the game freezing while the driver
-    // compiles). Full-screen passes (no depth, few vertices) still wait, so a lighting or post
-    // pass is never dropped. EDEN_NX2_ASYNC_DISCARD=0 waits for every pipeline.
-    static const bool discard_native = [] {
-        const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD");
-        const bool enabled = value == nullptr || value[0] != '0';
-        LOG_INFO(Render_Vulkan, "EDEN_NX2_ASYNC_DISCARD: native draws {} unbuilt pipelines",
-                 enabled ? "skip" : "wait for");
-        return enabled;
-    }();
-    const auto& draw_state = maxwell3d->draw_manager.draw_state;
-    const bool discard = CanDiscardPendingDraw(maxwell3d->GetNativeMacroEngine().native_turing,
-                                              maxwell3d->regs.zeta_enable != 0,
-                                              draw_state.draw_element_count,
-                                              draw_state.draw_element_count, discard_native);
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    const bool discard = CanDiscardPendingDraw(native, maxwell3d->regs.zeta_enable != 0,
+                                               draw.draw_element_count, draw.draw_element_count, true);
+    if (native) {
+        static const std::optional<bool> discard_override = []() -> std::optional<bool> {
+            if (const char* value = std::getenv("EDEN_NX2_ASYNC_DISCARD")) {
+                return value[0] != '0';
+            }
+            return std::nullopt;
+        }();
+        const auto mode = ResolveNativePendingMode(Settings::values.native_async_draws.GetValue(),
+                                                   discard_override);
+        const s64 budget_us =
+            static_cast<s64>(Settings::values.native_pipeline_wait_ms.GetValue()) * 1000;
+        const s64 remaining = budget_us - native_frame_wait_us;
+        switch (DecideNativePending(mode, discard, remaining)) {
+        case NativeDrawAction::Wait:
+            return pipeline;
+        case NativeDrawAction::Skip:
+            break;
+        case NativeDrawAction::WaitTimed: {
+            const auto begin = std::chrono::steady_clock::now();
+            const bool built = pipeline->WaitBuilt(std::chrono::microseconds{remaining});
+            const auto end = std::chrono::steady_clock::now();
+            const auto spent =
+                std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+            native_frame_wait_us += spent;
+            native_wait_used_us += spent;
+            if (end - native_wait_log_start > std::chrono::seconds{10}) {
+                LOG_INFO(Render_Vulkan, "Bounded pipeline waits totaled {:.1f} ms since the previous report",
+                         static_cast<double>(native_wait_used_us) / 1000.0);
+                native_wait_used_us = 0;
+                native_wait_log_start = end;
+            }
+            if (built) {
+                return pipeline;
+            }
+            break;
+        }
+        }
+    }
     if (discard) {
         static std::atomic<u64> skipped{};
         if ((skipped.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {

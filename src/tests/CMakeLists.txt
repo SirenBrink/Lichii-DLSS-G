@@ -157,6 +157,7 @@ add_executable(tests
     video_core/ampere_ldc.cpp
     video_core/ampere_vote.cpp
     video_core/shader_attributes.cpp
+    video_core/gpu_written_pages.cpp
     video_core/indirect_reset.cpp
     video_core/syncpoint_manager.cpp
     input_common/calibration_configuration_job.cpp

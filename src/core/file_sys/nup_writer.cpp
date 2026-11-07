@@ -2346,9 +2346,13 @@ EditResult EditNupMetadata(const fs::path& archive, const MetadataEdit& edit,
             meta_start = std::min(meta_start, raw.meta_offset);
         }
     }
-    if (meta_start < blob_offset || meta_start > file_size) {
+    if (meta_start > file_size) {
         return fail(EditResult::InvalidSource, "bad meta start");
     }
+    // Metadata after the blob region is rewritten where it starts. Some packers put it between
+    // the TOC and the blob instead: then the whole blob is kept, the new metadata goes after it
+    // and the old blocks are zeroed with the rest of the gap.
+    const u64 blob_end = meta_start >= blob_offset ? meta_start : file_size;
 
     std::vector<std::vector<u8>> new_metas(raws.size());
     for (size_t i = 0; i < raws.size(); ++i) {
@@ -2387,7 +2391,7 @@ EditResult EditNupMetadata(const fs::path& archive, const MetadataEdit& edit,
         new_metas[i] = std::move(block);
     }
 
-    u64 cursor = meta_start;
+    u64 cursor = blob_end;
     std::vector<std::pair<u64, u32>> meta_addrs(raws.size());
     for (size_t i = 0; i < raws.size(); ++i) {
         if (new_metas[i].empty()) {
@@ -2472,7 +2476,7 @@ EditResult EditNupMetadata(const fs::path& archive, const MetadataEdit& edit,
             gap -= chunk;
         }
         std::vector<u8> buffer(ReadBufferSize);
-        u64 remaining = meta_start - blob_offset;
+        u64 remaining = blob_end - blob_offset;
         if (!in.Seek(static_cast<s64>(blob_offset))) {
             throw std::runtime_error("cannot seek to blob");
         }

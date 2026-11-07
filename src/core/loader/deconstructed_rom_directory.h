@@ -10,6 +10,7 @@
 #include <string>
 #include "common/common_types.h"
 #include "core/file_sys/control_metadata.h"
+#include "core/file_sys/ocarina_resolution.h"
 #include "core/file_sys/program_metadata.h"
 #include "core/loader/loader.h"
 
@@ -56,6 +57,7 @@ public:
     bool IsRomFSUpdatable() const override;
 
     ResultStatus ReadNSOModules(Modules& out_modules) override;
+    FileSys::OcarinaResolutionAddon resolution_addon;
 
 private:
     /// The loose RomFS next to the ExeFS, found (and built) on first use.

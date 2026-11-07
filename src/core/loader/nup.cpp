@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "core/loader/nup.h"
+#include "common/settings.h"
 
 #include <algorithm>
 #include <cstring>
@@ -195,6 +196,9 @@ AppLoader::LoadResult AppLoader_NUP::Load(Kernel::KProcess& process, Core::Syste
         return {ResultStatus::ErrorNUPNoBasePackage, {}};
     }
 
+    if (base_title_id == FileSys::OcarinaTitleId && Settings::values.ocarina_output_preset.GetValue()) {
+        secondary_loader->resolution_addon.Prepare(MergedRomFS());
+    }
     const auto result = secondary_loader->Load(process, system);
     if (result.first != ResultStatus::Success) {
         return result;
@@ -217,7 +221,7 @@ ResultStatus AppLoader_NUP::VerifyIntegrity(
     return nup->VerifyIntegrity(std::move(progress_callback));
 }
 
-ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
+FileSys::VirtualDir AppLoader_NUP::MergedRomFS() const {
     const auto base_index = nup->FindBasePackage();
     const auto base_romfs = base_index ? nup->GetRomFSDir(*base_index) : FileSys::VirtualDir{};
     const auto update_index = nup->FindBestUpdatePackage();
@@ -225,7 +229,15 @@ ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
         update_index ? nup->GetRomFSDir(*update_index) : FileSys::VirtualDir{};
     // A standalone update carries the complete merged tree; a base+update pair
     // overlays the update onto the base (SPEC §4.1.4).
-    const auto merged = FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+    return FileSys::NupContainer::MergeShadowDirs(base_romfs, update_romfs);
+}
+
+ResultStatus AppLoader_NUP::ReadRomFS(FileSys::VirtualFile& out_file) {
+    auto merged = MergedRomFS();
+    if (secondary_loader && secondary_loader->resolution_addon.applied &&
+        secondary_loader->resolution_addon.overlay) {
+        merged = FileSys::NupContainer::MergeShadowDirs(merged, secondary_loader->resolution_addon.overlay);
+    }
     if (merged == nullptr) {
         return ResultStatus::ErrorNoRomFS;
     }

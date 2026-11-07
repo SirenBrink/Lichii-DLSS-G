@@ -20,6 +20,7 @@
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/frontend/framebuffer_layout.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/core_timing.h"
@@ -524,6 +525,7 @@ struct System::Impl {
     }
 
     void ShutdownMainProcess() {
+        Layout::SetOcarinaTallOutput(false);
         debug_service.reset();
         SetShuttingDown(true);
         Common::ADPF::Shutdown();

@@ -24,6 +24,7 @@
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/ips_layer.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/ocarina_resolution.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/vfs/vfs_cached.h"
@@ -230,8 +231,8 @@ YUZU_NO_INLINE std::optional<u64> GetParentApplicationId(const ContentProvider* 
 
 PatchManager::PatchManager(u64 title_id_,
                            const Service::FileSystem::FileSystemController& fs_controller_,
-                           const ContentProvider& content_provider_)
-    : title_id{title_id_}, parent_title_id{GetParentApplicationId(std::addressof(content_provider_), title_id_)}, fs_controller{fs_controller_}, content_provider{content_provider_} {}
+                           const ContentProvider& content_provider_, OcarinaResolutionAddon* resolution_)
+    : resolution{resolution_}, title_id{title_id_}, parent_title_id{GetParentApplicationId(std::addressof(content_provider_), title_id_)}, fs_controller{fs_controller_}, content_provider{content_provider_} {}
 
 PatchManager::~PatchManager() = default;
 
@@ -573,6 +574,11 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                 apply = false;
                 break;
             }
+        }
+        if (apply && resolution && patch.name == "Max Resolution (built-in)") {
+            resolution->PatchModule(std::span{nso}.subspan(sizeof(Loader::NSOHeader)),
+                                    std::span{out}.subspan(sizeof(Loader::NSOHeader)),
+                                    Settings::OcarinaDlssInputScale());
         }
         if (!apply) {
             continue;

@@ -16,6 +16,7 @@ class NupContainer;
 } // namespace FileSys
 
 namespace Loader {
+class AppLoader_DeconstructedRomDirectory;
 
 /// Loads a NUP (NX Package) container: loose ExeFS/RomFS trees for a base
 /// program plus its updates in one file. The newest update package is layered
@@ -53,7 +54,8 @@ public:
 
 private:
     std::unique_ptr<FileSys::NupContainer> nup;
-    std::unique_ptr<AppLoader> secondary_loader;
+    FileSys::VirtualDir MergedRomFS() const;
+    std::unique_ptr<AppLoader_DeconstructedRomDirectory> secondary_loader;
 
     std::unique_ptr<FileSys::NACP> nacp_file;
     FileSys::VirtualFile icon_file;

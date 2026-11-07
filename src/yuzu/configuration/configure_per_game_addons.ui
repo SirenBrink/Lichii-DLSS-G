@@ -17,6 +17,17 @@
    <string>Add-Ons</string>
   </property>
   <layout class="QGridLayout" name="gridLayout">
+   <item row="2" column="0">
+    <widget class="QLabel" name="resolutionLabel">
+     <property name="text"><string>Max Resolution preset (docked)</string></property>
+     <property name="buddy"><cstring>resolutionPreset</cstring></property>
+    </widget>
+   </item>
+   <item row="2" column="1">
+    <widget class="QComboBox" name="resolutionPreset">
+     <property name="toolTip"><string>Output dimensions for the Ocarina of Time Max Resolution add-on. Takes effect on the next game launch.</string></property>
+    </widget>
+   </item>
    <item row="1" column="0">
     <widget class="QPushButton" name="zip">
      <property name="text">

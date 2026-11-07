@@ -25,6 +25,7 @@ class FileSystemController;
 
 namespace FileSys {
 
+struct OcarinaResolutionAddon;
 class ContentProvider;
 class NCA;
 class NACP;
@@ -59,7 +60,7 @@ public:
 
     explicit PatchManager(u64 title_id_,
                           const Service::FileSystem::FileSystemController& fs_controller_,
-                          const ContentProvider& content_provider_);
+                          const ContentProvider& content_provider_, OcarinaResolutionAddon* resolution = nullptr);
     ~PatchManager();
 
     [[nodiscard]] u64 GetTitleID() const;
@@ -116,6 +117,7 @@ private:
     [[nodiscard]] std::vector<VirtualFile> CollectPatches(const std::vector<VirtualDir>& patch_dirs,
                                                           const std::string& build_id) const;
 
+    OcarinaResolutionAddon* resolution;
     u64 title_id;
     std::optional<u64> parent_title_id;
     const Service::FileSystem::FileSystemController& fs_controller;

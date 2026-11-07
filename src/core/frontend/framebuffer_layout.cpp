@@ -10,8 +10,15 @@
 #include "common/settings.h"
 #include "common/settings_enums.h"
 #include "core/frontend/framebuffer_layout.h"
+#include <atomic>
 
 namespace Layout {
+namespace {
+std::atomic_bool ocarina_tall_output{};
+}
+void SetOcarinaTallOutput(bool enabled) noexcept {
+    ocarina_tall_output.store(enabled, std::memory_order_relaxed);
+}
 
 // Finds the largest size subrectangle contained in window area that is confined to the aspect ratio
 static Common::Rectangle<u32> MaxRectangle(Common::Rectangle<u32> window_area, float screen_aspect_ratio) noexcept {
@@ -26,7 +33,9 @@ static Common::Rectangle<u32> MaxRectangle(Common::Rectangle<u32> window_area, f
 FramebufferLayout DefaultFrameLayout(u32 width, u32 height) noexcept {
     ASSERT(width > 0 && height > 0);
     auto const window_aspect_ratio = float(height) / float(width);
-    auto const emulation_aspect_ratio = EmulationAspectRatio(Settings::values.aspect_ratio.GetValue(), window_aspect_ratio);
+    const auto aspect = Settings::values.aspect_ratio.GetValue();
+    const auto emulation_aspect_ratio = ocarina_tall_output.load(std::memory_order_relaxed) &&
+        aspect == Settings::AspectRatio::R16_9 ? 10.f / 16.f : EmulationAspectRatio(aspect, window_aspect_ratio);
     Common::Rectangle<u32> const screen_window_area{0, 0, width, height};
     auto screen = MaxRectangle(screen_window_area, emulation_aspect_ratio);
     if (window_aspect_ratio < emulation_aspect_ratio) {

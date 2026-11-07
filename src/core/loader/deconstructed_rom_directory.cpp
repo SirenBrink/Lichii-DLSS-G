@@ -20,6 +20,8 @@
 #include "core/file_sys/content_archive.h"
 #include "core/file_sys/control_metadata.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/nup_container.h"
+#include "core/frontend/framebuffer_layout.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/romfs_factory.h"
 #include "core/hle/kernel/k_page_table.h"
@@ -504,8 +506,12 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
     modules.clear();
     const VAddr base_address{GetInteger(process.GetEntryPoint())};
     VAddr next_load_addr{base_address};
+    if (metadata.GetTitleID() == FileSys::OcarinaTitleId && romfs &&
+        Settings::values.ocarina_output_preset.GetValue() && !resolution_addon.overlay) {
+        resolution_addon.Prepare(FileSys::ExtractRomFS(romfs));
+    }
     const FileSys::PatchManager pm{metadata.GetTitleID(), system.GetFileSystemController(),
-                                   system.GetContentProvider()};
+                                   system.GetContentProvider(), &resolution_addon};
     for (size_t i = 0; i < static_modules.size(); i++) {
         const auto& module = static_modules[i];
         const FileSys::VirtualFile module_file{dir->GetFile(module)};
@@ -527,6 +533,13 @@ AppLoader_DeconstructedRomDirectory::LoadResult AppLoader_DeconstructedRomDirect
         LOG_DEBUG(Loader, "loaded module {} @ {:#x}", module, load_addr);
     }
 
+    if (resolution_addon.applied && resolution_addon.overlay) {
+        Layout::SetOcarinaTallOutput(resolution_addon.output.width * 10 == resolution_addon.output.height * 16);
+        if (romfs) {
+            romfs = FileSys::CreateRomFS(FileSys::NupContainer::MergeShadowDirs(
+                FileSys::ExtractRomFS(romfs), resolution_addon.overlay));
+        }
+    }
     if (standalone) {
         // Without this, fsp-srv SetCurrentProcess fails with ResultTargetNotFound.
         system.GetFileSystemController().RegisterProcess(

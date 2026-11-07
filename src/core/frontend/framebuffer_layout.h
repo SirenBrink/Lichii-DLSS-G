@@ -14,6 +14,7 @@ enum class AspectRatio : u32;
 }
 
 namespace Layout {
+void SetOcarinaTallOutput(bool enabled) noexcept;
 
 namespace MinimumSize {
 constexpr u32 Width = 640;

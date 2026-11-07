@@ -347,6 +347,7 @@ struct Values {
 
     // Graphics Settings
     ResolutionScalingInfo resolution_info{};
+    SwitchableSetting<u32> ocarina_output_preset{linkage, 0, "ocarina_output_preset", Category::AddOns};
     SwitchableSetting<ResolutionSetup> resolution_setup{linkage, ResolutionSetup::Res1X,
                                                         "resolution_setup", Category::Renderer};
 

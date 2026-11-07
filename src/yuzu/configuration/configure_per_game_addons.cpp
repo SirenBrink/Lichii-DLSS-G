@@ -25,6 +25,7 @@
 #include "configuration/addon/mod_select_dialog.h"
 #include "core/core.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/ocarina_resolution.h"
 #include "core/loader/loader.h"
 #include "frontend_common/mod_manager.h"
 #include "qt_common/abstract/frontend.h"
@@ -37,6 +38,12 @@
 ConfigurePerGameAddons::ConfigurePerGameAddons(Core::System& system_, QWidget* parent)
     : QWidget(parent), ui{std::make_unique<Ui::ConfigurePerGameAddons>()}, system{system_} {
     ui->setupUi(this);
+    ui->resolutionPreset->addItem(tr("Game default"));
+    for (const auto size : std::span{FileSys::OcarinaOutputSizes}.subspan(1)) {
+        ui->resolutionPreset->addItem(QStringLiteral("%1 × %2 (%3)")
+            .arg(size.width).arg(size.height).arg(size.width * 10 == size.height * 16 ?
+                QStringLiteral("16:10") : QStringLiteral("16:9")));
+    }
 
     layout = new QVBoxLayout;
     tree_view = new QTreeView;
@@ -104,6 +111,14 @@ void ConfigurePerGameAddons::OnItemChanged(QStandardItem* item) {
 }
 
 void ConfigurePerGameAddons::ApplyConfiguration() {
+    if (title_id == FileSys::OcarinaTitleId && !system.IsPoweredOn()) {
+        const auto selected = static_cast<u32>(ui->resolutionPreset->currentIndex());
+        auto& setting = Settings::values.ocarina_output_preset;
+        setting.SetGlobal(selected == 0);
+        if (selected) {
+            setting.SetValue(selected);
+        }
+    }
     std::vector<std::string> disabled_addons;
 
     for (const auto& item : list_items) {
@@ -142,6 +157,14 @@ void ConfigurePerGameAddons::SetFile(FileSys::VirtualFile file_) {
 
 void ConfigurePerGameAddons::SetTitleId(u64 id) {
     this->title_id = id;
+    const bool ocarina = id == FileSys::OcarinaTitleId;
+    ui->resolutionLabel->setVisible(ocarina);
+    ui->resolutionPreset->setVisible(ocarina);
+    ui->resolutionPreset->setEnabled(!system.IsPoweredOn());
+    if (ocarina) {
+        const u32 index = Settings::values.ocarina_output_preset.GetValue();
+        ui->resolutionPreset->setCurrentIndex(index < FileSys::OcarinaOutputSizes.size() ? static_cast<int>(index) : 0);
+    }
 }
 
 void ConfigurePerGameAddons::InstallMods(const QStringList& mods) {

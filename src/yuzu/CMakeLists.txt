@@ -15,7 +15,12 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 if(YUZU_TESTS)
-    add_subdirectory(../tests/qt_compatibility ${CMAKE_BINARY_DIR}/qt_compatibility_tests)
+    find_package(Qt6 QUIET COMPONENTS Test)
+    if (TARGET Qt6::Test)
+        add_subdirectory(../tests/qt_compatibility ${CMAKE_BINARY_DIR}/qt_compatibility_tests)
+    else()
+        message(STATUS "Qt Test unavailable; skipping the compatibility report UI test")
+    endif()
 endif()
 
 add_executable(yuzu

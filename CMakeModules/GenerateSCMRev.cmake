@@ -25,7 +25,7 @@ if (EXISTS "${FRIZTI_VERSION_FILE}")
     endif()
 endif()
 
-if (LICHII_BUILD_TAG MATCHES "^build-[0-9]+$")
+if (LICHII_BUILD_TAG MATCHES "^(build-[0-9]+|v[0-9]+-community[.][0-9]+)$")
     set(BUILD_VERSION "${LICHII_BUILD_TAG}")
     set(IS_DEV_BUILD false)
 elseif (FRIZTI_VERSION)

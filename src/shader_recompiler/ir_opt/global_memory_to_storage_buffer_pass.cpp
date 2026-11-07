@@ -31,6 +31,10 @@ namespace {
 /// Address in constant buffers to the storage buffer descriptor
 struct StorageBufferAddr {
     auto operator<=>(const StorageBufferAddr&) const noexcept = default;
+    // A memberwise comparison avoids the MSVC STL vectorized find for this 12-byte type.
+    bool operator==(const StorageBufferAddr& rhs) const noexcept {
+        return index == rhs.index && offset == rhs.offset && indirect == rhs.indirect;
+    }
 
     u32 index;
     u32 offset;

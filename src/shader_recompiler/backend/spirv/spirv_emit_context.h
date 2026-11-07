@@ -370,6 +370,7 @@ public:
 
     Id output_point_size{};
     Id output_position{};
+    Id captured_vertex_index{};
     std::array<std::array<GenericElementInfo, 4>, 32> output_generics{};
 
     Id output_tess_level_outer{};

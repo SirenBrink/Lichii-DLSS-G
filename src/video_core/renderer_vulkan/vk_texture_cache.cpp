@@ -1843,8 +1843,8 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
     const bool reset = !fsr3_last_evaluation || frame_time_ms > 250.0f;
     fsr3_last_evaluation = now;
 #ifdef EGLANTINE_STREAMLINE
-    if (UpscaleWithDlss(dst_framebuffer, input_color, motion_vectors, depth, render_size, jitter,
-                        motion_scale, reset)) {
+    if (UpscaleWithDlss(dst_framebuffer, input_color, &motion_vectors, depth, render_size, jitter,
+                        motion_scale, DlssDepth::Reversed, reset)) {
         return true;
     }
 #endif
@@ -1913,7 +1913,7 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
 }
 
 void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view,
-                                             VkImage output, VkSampler sampler) {
+                                             VkImage output, VkSampler sampler, float detail) {
     // Draw the result into the DLSS output, which keeps its own format; the blit leaves the
     // upscaler's output image in SHADER_READ_ONLY_OPTIMAL, so return it to GENERAL for the next
     // frame.
@@ -1922,16 +1922,22 @@ void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkIma
         .start = {0, 0},
         .end = {static_cast<s32>(extent.width), static_cast<s32>(extent.height)},
     };
-    blit_image_helper.BlitColor(dst_framebuffer, view, output, sampler, region, region,
-                                {extent.width, extent.height, 1});
+    const bool restore_detail = detail > 0.f;
+    if (restore_detail) {
+        blit_image_helper.TemporalSharpen(dst_framebuffer, view, region, 0.f, detail);
+    } else {
+        blit_image_helper.BlitColor(dst_framebuffer, view, output, sampler, region, region,
+                                    {extent.width, extent.height, 1});
+    }
     scheduler.RequestOutsideRenderPassOperationContext();
-    scheduler.Record([output](vk::CommandBuffer cmdbuf) {
+    scheduler.Record([output, restore_detail](vk::CommandBuffer cmdbuf) {
         const VkImageMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .pNext = nullptr,
             .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
             .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .oldLayout =
+                restore_detail ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .newLayout = VK_IMAGE_LAYOUT_GENERAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -1950,11 +1956,46 @@ void TextureCacheRuntime::DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkIma
 }
 
 #ifdef EGLANTINE_STREAMLINE
+bool TextureCacheRuntime::OcarinaDlss(Framebuffer* output, ImageView& color, ImageView& depth,
+                                      std::array<u32, 2> size, float detail,
+                                      std::array<float, 2> jitter, bool scene_reset) {
+    const auto extent = output->RenderArea();
+    // The guest checked the aspect ratio before host scaling. Integer render sizes
+    // (e.g. two thirds of 2560 pixels) need not have an exact 16:9 ratio.
+    if (extent.width < size[0] || extent.height < size[1]) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const bool reset = scene_reset || !ocarina_last_frame ||
+                       now - *ocarina_last_frame > std::chrono::milliseconds(250);
+    try {
+        if (!ocarina_motion || ocarina_motion->extent.width != size[0] ||
+            ocarina_motion->extent.height != size[1]) {
+            if (ocarina_motion)
+                scheduler.Finish();
+            ocarina_motion = std::make_unique<OcarinaMotion>(
+                device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator,
+                VkExtent2D{size[0], size[1]});
+        }
+        const bool submitted =
+            UpscaleWithDlss(output, color, nullptr, depth, size, jitter,
+                            {1.f / size[0], 1.f / size[1]}, DlssDepth::Forward, reset, detail);
+        if (submitted)
+            ocarina_last_frame = now;
+        return submitted;
+    } catch (const vk::Exception& e) {
+        dlss_unsupported = true;
+        LOG_WARNING(Render_Vulkan, "Ocarina DLSS setup failed: {}; keeping game tensor path",
+                    e.what());
+        return false;
+    }
+}
+
 bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
-                                          ImageView& motion_vectors, ImageView& depth,
-                                          std::array<u32, 2> render_size,
-                                          std::array<f32, 2> jitter,
-                                          std::array<f32, 2> motion_scale, bool reset) {
+                                          ImageView* motion_vectors, ImageView& depth,
+                                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
+                                          std::array<f32, 2> motion_scale,
+                                          DlssDepth depth_direction, bool reset, float detail) {
     // EDEN_NX2_DLSS_REPLACEMENT=fsr keeps FSR 3.1 for A/B runs.
     static const bool force_fsr = [] {
         const char* const value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
@@ -1993,24 +2034,37 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
                 .layerCount = 1,
             },
             .barrier_aspect = ImageAspectMask(view.format),
+            .usage = view.BackingImage() ? view.BackingImage()->UsageFlags()
+                                         : VkImageUsageFlags{VK_IMAGE_USAGE_SAMPLED_BIT},
         };
     };
     const VkExtent2D extent = dst_framebuffer->RenderArea();
     bool upscaled{};
     try {
         upscaled = dlss_upscaler->Upscale({
-            .color = image(input_color, input_color.Handle(Shader::TextureType::Color2D),
-                           VK_IMAGE_ASPECT_COLOR_BIT),
+            .color = motion_vectors
+                         ? image(input_color, input_color.Handle(Shader::TextureType::Color2D),
+                                 VK_IMAGE_ASPECT_COLOR_BIT)
+                         : ocarina_motion->LinearColor(),
             .depth = image(depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
-            .motion_vectors = image(motion_vectors,
-                                    motion_vectors.Handle(Shader::TextureType::Color2D),
-                                    VK_IMAGE_ASPECT_COLOR_BIT),
+            .motion_vectors =
+                motion_vectors
+                    ? image(*motion_vectors, motion_vectors->Handle(Shader::TextureType::Color2D),
+                            VK_IMAGE_ASPECT_COLOR_BIT)
+                    : ocarina_motion->Estimate(input_color.Handle(Shader::TextureType::Color2D),
+                                               depth.DepthView(), reset,
+                                               input_color.format == PixelFormat::E5B9G9R9_FLOAT,
+                                               ocarina_camera, ocarina_camera_frame, ocarina_geometry),
+            .frame_generation_motion = motion_vectors ? std::nullopt : ocarina_motion->FrameGenerationMotion(),
             .render_size = {render_size[0], render_size[1]},
             .upscale_size = extent,
             .jitter = jitter,
             .motion_vector_scale = {motion_scale[0] * static_cast<f32>(render_size[0]),
                                     motion_scale[1] * static_cast<f32>(render_size[1])},
+            .depth_direction = depth_direction,
+            .ocarina_scene = motion_vectors == nullptr,
             .reset = reset,
+            .camera = motion_vectors ? std::nullopt : ocarina_camera,
         });
     } catch (const vk::Exception& exception) {
         LOG_WARNING(Render_Vulkan, "NVIDIA DLSS evaluation unavailable ({}); using FSR 3.1",
@@ -2021,7 +2075,7 @@ bool TextureCacheRuntime::UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageVie
         return false;
     }
     DrawUpscaledOutput(dst_framebuffer, dlss_upscaler->OutputView(), dlss_upscaler->OutputImage(),
-                       dlss_upscaler->PointSampler());
+                       dlss_upscaler->PointSampler(), detail);
     static bool logged{};
     if (!logged) {
         logged = true;

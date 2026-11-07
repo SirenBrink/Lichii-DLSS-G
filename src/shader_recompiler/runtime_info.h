@@ -111,6 +111,7 @@ struct RuntimeInfo {
     /// Transform feedback state for each varying
     std::array<TransformFeedbackVarying, 256> xfb_varyings{};
     u32 xfb_count{0};
+    bool capture_clip_vertices{};
 
     /// Output types for each color attachment
     std::array<AttributeType, 8> color_output_types{};

@@ -1449,6 +1449,65 @@ std::optional<VideoCore::GameDlssProbe> TextureCache<P>::ProbeGameDlssOutput(
 }
 
 template <class P>
+bool TextureCache<P>::OcarinaDlss(const TICEntry& color, const TICEntry& depth,
+                                  const TICEntry& output, float detail, std::array<float, 2> jitter,
+                                  bool reset) {
+    if constexpr (!requires {
+                      runtime.OcarinaDlss(static_cast<Framebuffer*>(nullptr),
+                                          std::declval<ImageView&>(), std::declval<ImageView&>(),
+                                          std::array<u32, 2>{}, detail, jitter, reset);
+                  }) {
+        return false;
+    } else {
+        const std::array descriptors{color, depth, output};
+        std::array<ImageId, 3> ids{};
+        std::array<SubresourceRange, 3> ranges{};
+        has_deleted_images = false;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const auto& tic = descriptors[i];
+            const ImageInfo info(tic);
+            ids[i] = FindOrInsertImage(info, tic.Address());
+            if (!ids[i] || has_deleted_images)
+                return false;
+            const auto& image = slot_images[ids[i]];
+            const auto base = image.TryFindBase(tic.Address());
+            if (!base || image.info.num_samples != 1)
+                return false;
+            ranges[i] = SubresourceRange{.base = *base, .extent = {1, 1}};
+        }
+        if (ids[0] == ids[2] || ids[1] == ids[2] || ids[0] == ids[1])
+            return false;
+        const auto scaled = [&](ImageId id) {
+            return True(slot_images[id].flags & ImageFlagBits::Rescaled);
+        };
+        for (auto id : ids)
+            PrepareImage(id, false, false);
+        if (scaled(ids[0]) != scaled(ids[1]))
+            return false;
+        const auto& resolution = Settings::values.resolution_info;
+        if (resolution.active && !scaled(ids[2]) && ImageCanRescale(slot_images[ids[2]])) {
+            ScaleUp(slot_images[ids[2]]);
+        }
+        const std::array<u32, 2> extent =
+            scaled(ids[0])
+                ? std::array{resolution.ScaleUp(color.Width()), resolution.ScaleUp(color.Height())}
+                : std::array{color.Width(), color.Height()};
+        const auto view = [&](size_t i) {
+            return ImageViewInfo(ImageViewType::e2D, ImageInfo(descriptors[i]).format, ranges[i]);
+        };
+        const auto src_id = FindOrEmplaceImageView(ids[0], view(0));
+        const auto z_id = FindOrEmplaceImageView(ids[1], view(1));
+        const auto [target, target_view] = RenderTargetFromImage(ids[2], view(2));
+        const bool submitted =
+            runtime.OcarinaDlss(&slot_framebuffers[target], slot_image_views[src_id],
+                                slot_image_views[z_id], extent, detail, jitter, reset);
+        if (submitted)
+            PrepareImage(ids[2], true, false);
+        return submitted;
+    }
+}
+
+template <class P>
 bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& dst,
                                       const Tegra::Engines::Fermi2D::Surface& src,
                                       const Tegra::Engines::Fermi2D::Surface& motion_vectors,

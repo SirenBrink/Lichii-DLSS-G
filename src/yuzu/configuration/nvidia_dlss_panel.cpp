@@ -391,6 +391,9 @@ void NvidiaDlssPanel::Refresh() {
     const bool ready = has_loader && has_model;
     icon_label->setText(ready ? QStringLiteral("<span style=\"color:#2ea043\">&#10004;</span>")
                               : QStringLiteral("<span style=\"color:#d29922\">&#9888;</span>"));
+    if (!files.generation_files) {
+        status += Tr("<br>For Ocarina frame generation, run <b>Install NVIDIA DLSS.cmd</b> next to the emulator, then restart.");
+    }
     status_label->setText(status);
     status_label->setToolTip(Tr("Folder: %1").arg(PathText(files.folder)));
     download_button->setText(button);

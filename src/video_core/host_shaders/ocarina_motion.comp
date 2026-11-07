@@ -1,0 +1,417 @@
+#version 460
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform sampler2D scene;
+layout(binding=1) uniform sampler2D history;
+layout(rg16f, binding=2) uniform writeonly image2D flow;
+layout(rg16f, binding=3) uniform writeonly image2D next_history;
+layout(rgba16f, binding=4) uniform writeonly image2D linear_color;
+layout(binding=5) uniform sampler2D scene_depth;
+layout(rg16f, binding=6) uniform writeonly image2D fg_flow;
+layout(binding=7) uniform sampler2D geometry_motion;
+layout(std430,binding=8) buffer GeometryStats { uint covered, accepted, moving, halo, equipmentAccepted, equipmentMoving, otherAccepted, otherMoving; };
+layout(push_constant) uniform Params {
+    uint reset;
+    uint packed_color;
+    uint use_camera;
+    uint save_depth;
+    mat4 clip_to_previous;
+    vec2 viewport_sign;
+    uint has_geometry;
+    uint sample_geometry;
+    uint geometry_for_sr;
+};
+
+shared float tile[64];
+shared float depths[64];
+shared float cost[34];
+shared ivec2 best;
+shared float fine_cost[4][9];
+shared vec2 fine_motion[4];
+
+// Current surface samples reprojected into the previous image. The final
+// displacement can differ from this prediction when a character moves.
+shared vec4 surfaceSamples[32]; // previous pixel XY, luminance, previous log depth
+shared float surfaceWeights[32];
+shared float searchCosts[64];
+shared vec2 searchOffsets[64];
+shared vec2 residual;
+shared float referenceDepth, brightCutoff, brightCoreDepth, cameraCost;
+shared bool searchActive, brightHasDepth;
+
+ivec2 searchOffset(uint candidate, int stepSize, ivec2 center) {
+    if (candidate < 9u) {
+        return center + (ivec2(int(candidate % 3u), int(candidate / 3u)) - 1) * stepSize;
+    }
+    // An independent local search keeps the coarse pass from locking onto a
+    // similar-looking edge several pixels away during slow camera motion.
+    uint local = candidate - 9u;
+    return 2 * (ivec2(int(local % 5u), int(local / 5u)) - 2);
+}
+
+vec2 halfStep(uint candidate) {
+    return 0.5 * vec2(ivec2(int(candidate % 3u), int(candidate / 3u)) - 1);
+}
+
+float matchError(vec2 sampleValue, float luma, float logDepth) {
+    // Log(1-Z) keeps far-plane separation after a 16-bit history store.
+    float depthError = max(abs(sampleValue.g - logDepth) - 0.08, 0.0);
+    return abs(sampleValue.r - luma) + 0.1 * min(depthError, 1.0);
+}
+
+float surfaceCost(vec2 delta, vec2 size, bool shortlist) {
+    float sum = 0.0, weights = 0.0;
+    for (int j = 0; j < (shortlist ? 8 : 32); ++j) {
+        // Spread eight cheap probes across the inner and outer samples.
+        int i = shortlist ? (5*j+2)%32 : j;
+        if (surfaceWeights[i] == 0.0) continue;
+        vec4 s = surfaceSamples[i];
+        vec2 uv = (s.xy + delta) / size;
+        float err = 0.25;
+        if (all(greaterThanEqual(uv, vec2(0))) && all(lessThanEqual(uv, vec2(1)))) {
+            vec2 old = textureLod(history, uv, 0).rg;
+            if (brightCutoff < 0.0) {
+                err = matchError(old, s.z, s.w);
+            } else {
+                // Match the bright shape, including the dark ring around it.
+                // Texture on scenery seen through the glow moves independently.
+                float floorLuma = brightCutoff * 0.78;
+                err = abs(max(old.r-floorLuma, 0.0) - max(s.z-floorLuma, 0.0));
+                if (brightHasDepth && s.z >= brightCutoff && s.w > brightCoreDepth-0.30)
+                    err += 0.10 * clamp(abs(old.g-s.w)-0.08, 0.0, 1.0);
+            }
+        }
+        sum += surfaceWeights[i] * min(err, 0.25);
+        weights += surfaceWeights[i];
+    }
+    return (weights > 0.0 ? sum / weights : 1.0) + 0.00004 * length(delta);
+}
+
+// The pixel matcher is deliberately local. Look for wider, diagonal movement
+// using a patch on the same surface, so clothing and limb edges can agree.
+void findSurfaceMotion(ivec2 origin, ivec2 size) {
+    uint lane = gl_LocalInvocationIndex;
+    if (lane < 32u) {
+        ivec2 grid = ivec2(int(lane % 4u), int(lane / 4u) % 4);
+        ivec2 offset = lane < 16u ? 2 * grid + 1 : 6 * grid - 5;
+        ivec2 p = clamp(origin + offset, ivec2(0), size - 1);
+        float z, luma;
+        if (lane < 16u) {
+            int localIndex = offset.x + 8 * offset.y;
+            z = depths[localIndex];
+            luma = tile[localIndex];
+        } else {
+            vec3 rgb = texelFetch(scene, p, 0).rgb;
+            if (packed_color == 0u) rgb = sqrt(max(rgb, vec3(0)));
+            luma = log2(1.0 + max(dot(rgb, vec3(.2126,.7152,.0722)), 0.0));
+            z = texelFetch(scene_depth, p, 0).r;
+        }
+        vec2 ndc = (2.0 * (vec2(p)+0.5) / vec2(size) - 1.0) * viewport_sign;
+        vec4 prev = clip_to_previous * vec4(ndc,z,1);
+        surfaceSamples[lane] = prev.w > 0.00001
+            ? vec4((0.5 + 0.5 * viewport_sign * prev.xy / prev.w) * vec2(size), luma,
+                   log2(max(1.0 - prev.z / prev.w, 1e-7))) : vec4(-1e6,-1e6,luma,-64);
+    }
+    barrier();
+    if (lane == 0u) {
+        float peak = 0.0, mean = 0.0;
+        referenceDepth = -64.0;
+        float brightDepth = -64.0, farDepth = 0.0;
+        for (int i=0; i<32; ++i) {
+            if (i < 16) referenceDepth = max(referenceDepth, surfaceSamples[i].w);
+            farDepth = min(farDepth, surfaceSamples[i].w);
+            peak = max(peak, surfaceSamples[i].z);
+            mean += surfaceSamples[i].z / 32.0;
+        }
+        // A bright translucent sprite may move across unchanged scene depth.
+        brightCutoff = peak > max(0.85, mean + 0.18)
+                     ? mean + 0.35 * (peak-mean) : -1.0;
+        int coreCount = 0;
+        if (brightCutoff >= 0.0) {
+            for (int i=0; i<32; ++i)
+                if (surfaceSamples[i].z >= brightCutoff)
+                    brightDepth = max(brightDepth, surfaceSamples[i].w);
+            for (int i=0; i<32; ++i)
+                if (surfaceSamples[i].z >= brightCutoff && surfaceSamples[i].w > brightDepth-0.3)
+                    ++coreCount;
+        }
+        brightHasDepth = brightCutoff >= 0.0 && coreCount >= 3 && brightDepth-farDepth > 0.6;
+        brightCoreDepth = brightDepth;
+        float innerWeight = 0.0;
+        int lightSamples = 0;
+        for (int i=0; i<32; ++i) {
+            vec4 s = surfaceSamples[i];
+            float weight = brightCutoff >= 0.0 ? (s.z >= brightCutoff ? 1.0 : 0.55)
+                                               : max(0.0, 1.0 - abs(referenceDepth-s.w)/0.30);
+            if (s.z >= brightCutoff) ++lightSamples;
+            surfaceWeights[i] = weight * (i < 16 ? 1.0 : 0.65);
+            if (i < 16) innerWeight += weight;
+        }
+        residual = vec2(0);
+        // Thin interleaved surfaces already have individual grass vectors. A
+        // wider object estimate needs enough contiguous foreground to support it.
+        searchActive = brightCutoff >= 0.0 ? lightSamples >= 3 : innerWeight >= 8.0;
+        if (searchActive) {
+            cameraCost = surfaceCost(vec2(0), vec2(size), false);
+            searchActive = cameraCost > 0.006;
+        }
+    }
+    barrier();
+    if (!searchActive) return;
+
+    // Rank offsets within 28 pixels of the camera prediction using sparse probes.
+    // Compare each lane's best candidate against the full patch before refinement.
+    float score = 1e6;
+    vec2 coarse = vec2(0);
+    const uint gridWidth = 29u;
+    for (uint i = lane; i < gridWidth*gridWidth; i += 64u) {
+        vec2 delta = 2.0 * (vec2(int(i % gridWidth), int(i / gridWidth)) - 14.0);
+        float c = surfaceCost(delta, vec2(size), true);
+        if (c < score) { score=c; coarse=delta; }
+    }
+    searchOffsets[lane]=coarse;
+    searchCosts[lane]=surfaceCost(coarse,vec2(size),false);
+    barrier();
+    if (lane == 0u) {
+        float lowest=cameraCost;
+        for (int i=0; i<64; ++i) {
+            if (searchCosts[i] < lowest) { lowest=searchCosts[i]; residual=searchOffsets[i]; }
+        }
+    }
+    barrier();
+    for (int level=0; level<2; ++level) {
+        float stepSize = level == 0 ? 1.0 : 0.5;
+        vec2 delta = residual + stepSize * (vec2(int(lane % 7u), int(lane / 7u)) - 3.0);
+        if (lane < 49u) searchCosts[lane] = surfaceCost(delta, vec2(size), false);
+        barrier();
+        if (lane == 0u) {
+            uint win=24u;
+            for (uint i=0u; i<49u; ++i)
+                if (searchCosts[i] < searchCosts[win]) win=i;
+            residual += stepSize * (vec2(int(win % 7u), int(win / 7u)) - 3.0);
+            if (level == 1)
+                searchActive = searchCosts[win] + 0.0015 < 0.70 * cameraCost;
+        }
+        barrier();
+    }
+}
+
+vec2 applySurfaceMotion(ivec2 p, ivec2 size, vec2 localMotion) {
+    if (!searchActive) return localMotion;
+    vec2 pixel = vec2(p) + 0.5;
+    vec2 ndc = (2.0*pixel/vec2(size)-1.0)*viewport_sign;
+    vec4 prev = clip_to_previous * vec4(ndc, depths[gl_LocalInvocationIndex], 1.0);
+    if (prev.w <= 0.00001) return localMotion;
+    float logDepth = log2(max(1.0-prev.z/prev.w, 1e-7));
+    float luma = tile[gl_LocalInvocationIndex];
+    if (brightCutoff >= 0.0 ? luma < brightCutoff*0.76 : abs(logDepth-referenceDepth) > 0.3)
+        return localMotion;
+    vec2 uv = 0.5 + 0.5 * viewport_sign * prev.xy/prev.w + residual/vec2(size);
+    if (any(lessThan(uv,vec2(0))) || any(greaterThan(uv,vec2(1)))) return localMotion;
+    vec2 obj = textureLod(history,uv,0).rg;
+    vec2 old = textureLod(history,(pixel+localMotion)/vec2(size),0).rg;
+    float objErr = brightCutoff >= 0.0 ? abs(obj.r-luma) : matchError(obj,luma,logDepth);
+    float oldErr = brightCutoff >= 0.0 ? abs(old.r-luma) : matchError(old,luma,logDepth);
+    float tolerance = oldErr < 0.001 ? 0.0005 : (brightCutoff >= 0.0 ? 0.035 : 0.012);
+    return objErr <= oldErr + tolerance ? uv*vec2(size)-pixel : localMotion;
+}
+
+bool sameSurface(vec4 geometry, float depth) {
+    // At 1440p the guest depth can come from a resampled prepass. Compare
+    // relative view depths to keep hidden triangles and cutout holes out.
+    return geometry.a > 0.5 && abs(geometry.b - log2(max(1.0-depth,1e-7))) < 0.035;
+}
+
+// A translucent glow can extend past the fairy's depth-writing core. Borrow
+// a core vector only when its projected brightness explains this pixel better.
+vec2 glowMotion(ivec2 pos, ivec2 size, float luma, vec2 fallback, out bool used) {
+    used = false;
+    if (luma < 0.70) return fallback;
+    vec2 pixel = vec2(pos) + 0.5;
+    float error = abs(textureLod(history,(pixel+fallback)/vec2(size),0).r - luma);
+    vec2 result = fallback;
+    const ivec2 directions[8] = {ivec2(1,0),ivec2(-1,0),ivec2(0,1),ivec2(0,-1),
+                                 ivec2(1,1),ivec2(1,-1),ivec2(-1,1),ivec2(-1,-1)};
+    for (int radius=2; radius<=8; radius*=2) {
+        for (int i=0; i<8; ++i) {
+            ivec2 q = clamp(pos + radius*directions[i],ivec2(0),size-1);
+            vec4 g = texelFetch(geometry_motion,q,0);
+            if (!sameSurface(g,texelFetch(scene_depth,q,0).r)) continue;
+            vec3 rgb = texelFetch(scene,q,0).rgb;
+            if (packed_color == 0u) rgb = sqrt(max(rgb,vec3(0)));
+            if (log2(1.0+max(dot(rgb,vec3(.2126,.7152,.0722)),0.0)) < max(luma,0.85)) continue;
+            float e = abs(textureLod(history,(pixel+g.xy)/vec2(size),0).r-luma);
+            if (e+0.002 < error) { result=g.xy; error=e; used=true; }
+        }
+    }
+    return result;
+}
+
+vec2 frameGenerationMotion(ivec2 pos, ivec2 size, vec2 blockMotion) {
+    vec2 pixel = vec2(pos) + 0.5;
+    uint lane = gl_LocalInvocationIndex;
+    vec2 ndc = (2.0 * pixel / vec2(size) - 1.0) * viewport_sign;
+    vec4 previous = clip_to_previous * vec4(ndc, depths[lane], 1.0);
+    if (previous.w <= 0.00001) return blockMotion;
+    vec2 previousUV = 0.5 + 0.5 * viewport_sign * previous.xy / previous.w;
+    vec2 cameraMotion = previousUV * vec2(size) - pixel;
+    // Newly exposed background at a screen edge has no valid color match.
+    if (any(lessThan(previousUV, vec2(0))) || any(greaterThan(previousUV, vec2(1))))
+        return clamp(cameraMotion, -vec2(size), vec2(size));
+    float logDepth = log2(max(1.0 - previous.z / previous.w, 1e-7));
+    float cameraCenter = matchError(textureLod(history, previousUV, 0).rg, tile[lane], logDepth);
+    if (cameraCenter < 0.002) return cameraMotion;
+
+    // A small moving foreground can be outvoted by the block matcher. Test
+    // alternatives against the previous depth before checking the neighborhood.
+    vec2 candidate = blockMotion;
+    float bestError = matchError(textureLod(history, (pixel + candidate) / vec2(size), 0).rg,
+                                 tile[lane], logDepth);
+    const vec2 axes[4] = {vec2(1,0), vec2(-1,0), vec2(0,1), vec2(0,-1)};
+    for (int k=0; k<4; ++k) {
+        for (int j=0; j<4; ++j) {
+            float radius = float(max(1, 3*j));
+            vec2 offset = cameraMotion + radius * axes[k];
+            vec2 uv = (pixel + offset) / vec2(size);
+            if (any(lessThan(uv,vec2(0))) || any(greaterThan(uv,vec2(1)))) continue;
+            float error = matchError(textureLod(history, uv, 0).rg, tile[lane], logDepth)
+                        + radius * 0.0005;
+            if (error < bestError) { bestError = error; candidate = offset; }
+        }
+    }
+    vec2 coarse = candidate;
+    for (int k=0; k<4; ++k) {
+        vec2 offset = coarse + axes[k];
+        vec2 uv = (pixel + offset) / vec2(size);
+        if (any(lessThan(uv,vec2(0))) || any(greaterThan(uv,vec2(1)))) continue;
+        float error = matchError(textureLod(history, uv, 0).rg, tile[lane], logDepth)
+                    + length(offset - cameraMotion) * 0.0005;
+        if (error < bestError) { bestError = error; candidate = offset; }
+    }
+
+    // Accept independently moving objects only when the image match explains
+    // their own surface better. Neighboring background must not vote for grass.
+    const ivec2 taps[5] = {ivec2(0), ivec2(-1,0), ivec2(1,0), ivec2(0,-1), ivec2(0,1)};
+    float cameraError = 0.0, blockError = 0.0, candidateError = 0.0, weightSum = 0.0;
+    for (int t=0; t<5; ++t) {
+        ivec2 local = ivec2(gl_LocalInvocationID.xy) + taps[t];
+        if (any(lessThan(local, ivec2(0))) || any(greaterThan(local, ivec2(7)))) continue;
+        int i = local.x + 8 * local.y;
+        float depthDelta = abs(depths[i] - depths[lane]);
+        float tolerance = max(0.000001, (1.0 - depths[lane]) * 0.04);
+        float weight = (t == 0 ? 2.0 : 1.0) / (1.0 + depthDelta / tolerance);
+        vec2 uv = (pixel + vec2(taps[t])) / vec2(size);
+        cameraError += weight * matchError(textureLod(history, uv + cameraMotion / vec2(size), 0).rg, tile[i], logDepth);
+        blockError += weight * matchError(textureLod(history, uv + blockMotion / vec2(size), 0).rg, tile[i], logDepth);
+        candidateError += weight * matchError(textureLod(history, uv + candidate / vec2(size), 0).rg, tile[i], logDepth);
+        weightSum += weight;
+    }
+    if (candidateError < blockError) { blockError = candidateError; blockMotion = candidate; }
+    return blockError + weightSum * 0.002 < cameraError * 0.65 ? blockMotion : cameraMotion;
+}
+
+void main() {
+    ivec2 size = textureSize(scene, 0);
+    ivec2 origin = ivec2(gl_WorkGroupID.xy) * 8;
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    uint lane = gl_LocalInvocationIndex;
+    vec3 rgb = texelFetch(scene, min(pos, size-1), 0).rgb;
+    vec3 perceptual = packed_color != 0u ? rgb : sqrt(max(rgb, vec3(0.0)));
+    float luma = log2(1.0 + max(0.0, dot(perceptual, vec3(.2126,.7152,.0722))));
+    tile[lane] = luma;
+    if (save_depth != 0u) depths[lane] = texelFetch(scene_depth, min(pos, size - 1), 0).r;
+    if (lane == 0) best = ivec2(0);
+    barrier();
+    // Each 8x8 block independently searches the previous scene in render pixels.
+    vec2 motion = vec2(0.0);
+    if (reset == 0u) {
+        for (int stepSize=8; stepSize>0; stepSize/=2) {
+            uint candidates = stepSize == 2 ? 34u : 9u;
+            if (lane < candidates) {
+                ivec2 offset = searchOffset(lane, stepSize, best);
+                float score = .0005 * length(vec2(offset));
+                for (int y=1; y<8; y+=2) {
+                    for (int x=1; x<8; x+=2) {
+                        float prev = texelFetch(history, clamp(origin+ivec2(x,y)+offset,ivec2(0),size-1),0).r;
+                        score += abs(tile[y*8+x]-prev);
+                    }
+                }
+                cost[lane] = score;
+            }
+            barrier();
+            if (lane == 0) {
+                uint winner = 4u;
+                for (uint i = 0u; i < candidates; ++i) {
+                    if (cost[i] < cost[winner]) winner = i;
+                }
+                best = searchOffset(winner, stepSize, best);
+            }
+            barrier();
+        }
+
+        // Refine the integer match independently on each 4x4 quadrant. Bilinear
+        // history samples can follow an edge moving less than one render pixel.
+        if (lane < 36u) {
+            uint quadrant = lane / 9u;
+            uint candidate = lane % 9u;
+            ivec2 corner = 4 * ivec2(int(quadrant % 2u), int(quadrant / 2u));
+            vec2 offset = vec2(best) + halfStep(candidate);
+            float score = 0.0005 * length(offset);
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    ivec2 local = corner + ivec2(x, y);
+                    vec2 uv = (vec2(origin + local) + 0.5 + offset) / vec2(size);
+                    score += abs(tile[local.y * 8 + local.x] - textureLod(history, uv, 0.0).r);
+                }
+            }
+            fine_cost[quadrant][candidate] = score;
+        }
+        barrier();
+        if (lane < 4u) {
+            uint winner = 4u;
+            for (uint i = 0u; i < 9u; ++i) {
+                if (fine_cost[lane][i] < fine_cost[lane][winner]) winner = i;
+            }
+            fine_motion[lane] = vec2(best) + halfStep(winner);
+        }
+        barrier();
+        motion = fine_motion[gl_LocalInvocationID.x / 4u + 2u * (gl_LocalInvocationID.y / 4u)];
+    }
+    if (use_camera != 0u) findSurfaceMotion(origin, size);
+    if (all(lessThan(pos,size))) {
+        // NDSR packs sqrt(scene-linear RGB) into RGB9E5. Its reconstruction
+        // squares those samples before writing the linear R11G11B10 target.
+        imageStore(linear_color, pos, vec4(packed_color != 0u ? rgb * rgb : rgb, 1.0));
+        if (use_camera != 0u) {
+            vec4 geom = vec4(0);
+            if (has_geometry != 0u) geom = texelFetch(geometry_motion,pos,0);
+            bool valid = sameSurface(geom,depths[lane]);
+            bool glow = false;
+            vec2 fgMotion;
+            if (valid) {
+                fgMotion = geom.xy;
+            } else {
+                fgMotion = applySurfaceMotion(pos,size,frameGenerationMotion(pos,size,motion));
+                if (has_geometry != 0u) fgMotion = glowMotion(pos,size,luma,fgMotion,glow);
+            }
+            // Keep frame-generation silhouette and glow corrections in its own field.
+            if (geometry_for_sr != 0u && (valid || glow)) motion = fgMotion;
+            if (sample_geometry != 0u && lane == 0u) {
+                if (geom.a > 0.5) atomicAdd(covered,1u);
+                if (valid) atomicAdd(accepted,1u);
+                if (valid && length(fgMotion)>0.1) atomicAdd(moving,1u);
+                if (glow) atomicAdd(halo,1u);
+                if (valid && geom.a == 3.0) {
+                    atomicAdd(otherAccepted, 1u);
+                    if (length(fgMotion) > 0.1) atomicAdd(otherMoving, 1u);
+                } else if (valid && geom.a == 2.0) {
+                    atomicAdd(equipmentAccepted, 1u);
+                    if (length(fgMotion) > 0.1) atomicAdd(equipmentMoving, 1u);
+                }
+            }
+            imageStore(fg_flow,pos,vec4(fgMotion,0,0));
+        }
+        imageStore(flow,pos,vec4(motion,0,0));
+        float logDepth = save_depth != 0u ? log2(max(1.0 - depths[lane], 1e-7)) : 0.0;
+        imageStore(next_history,pos,vec4(luma, logDepth, 0, 0));
+    }
+}

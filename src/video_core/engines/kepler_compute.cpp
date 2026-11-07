@@ -9,6 +9,7 @@
 #include <bit>
 #include <bitset>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -16,28 +17,31 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
-#include "shader_recompiler/exception.h"
 #include "core/core.h"
-#include "video_core/gpu_split.h"
-#include "video_core/fire_emblem_upscale.h"
-#include "video_core/nx2_profile.h"
-#include "video_core/nx2.h"
+#include "shader_recompiler/exception.h"
 #include "video_core/engines/fermi_2d.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/nx2_indirect_grid.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/fire_emblem_upscale.h"
 #include "video_core/game_dlss_status.h"
+#include "video_core/gpu_split.h"
 #include "video_core/memory_manager.h"
 #include "video_core/native_query_trace.h"
+#include "video_core/nx2.h"
+#include "video_core/nx2_profile.h"
+#include "video_core/ocarina_dlss_debug.h"
 #ifdef ARCHITECTURE_x86_64
 #include "video_core/macro_turing_jit.h"
 #endif
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/image_info.h"
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Engines {
@@ -710,6 +714,15 @@ constexpr u32 DLSS_CHECK_MISMATCH_PERCENT = 3;
 
 bool KeplerCompute::ProcessGameDlss(u64 program_id, u64 native_key) {
     using namespace VideoCommon::FireEmblemUpscale;
+    constexpr u64 ocarina_id = 0x0400486024DEC000ULL;
+    if (program_id == ocarina_id ||
+        (program_id == 0 && Settings::GetCurrentProgramID() == ocarina_id)) {
+        static const bool track_scene = [] {
+            const char* value = std::getenv("EDEN_OOT_30FPS");
+            return value && std::string_view{value} == "1";
+        }();
+        return (rasterizer->UsesNvidiaDlss() || track_scene) && TryOcarinaUpscale(native_key);
+    }
     const auto passes = CapturedPasses(program_id);
     if (!passes) {
         return false;
@@ -949,6 +962,126 @@ bool KeplerCompute::FinishDlssEvaluation() {
         return false;
     }
     return TryFireEmblemUpscale();
+}
+
+// Ocarina 1.1.1 uses multiple resolve kernels with the same scene texture bindings.
+// Keep the native dispatch whenever the program or its live descriptors do not match.
+bool KeplerCompute::TryOcarinaUpscale(u64 key) {
+    constexpr u64 depth_a = 0x20ab4117f4db5bdbULL;
+    constexpr u64 depth_b = 0xe2d9edfe87bd5a80ULL;
+    // Scale-specific kernels in agl_ndsr_vr_light.pck. The prefilters read +0xa8/+0xb8,
+    // and every final kernel reads the packed color at +0xc0 and writes +0xd0.
+    constexpr std::array prefilters{0x32800231725e419fULL, 0x558bbc45e0f2e10bULL,
+                                    0x42593194bb0b2b32ULL};
+    constexpr std::array resolves{
+        0x378e625f86d24bfeULL, 0xda6df3e54c716df2ULL, 0xc4d97352d76e1dd4ULL,
+        0x6f9367bd41dc0b58ULL, 0x8a71047ddf93c3a2ULL, 0x315c67a12793e140ULL,
+        0xb12a61924ec152fcULL, 0x5bb12e1ef721b75fULL, 0x07b5606d859fe776ULL,
+        0xe4cda162ff6009e2ULL, 0x9a56c6b58ba1003bULL, 0xd8efd9f0c95abd80ULL,
+        0x3cc9ecc1ee5a3972ULL, 0x1b02c50a61f177cdULL, 0xf48db7481be856b9ULL};
+    const bool prefilter_pass = std::ranges::find(prefilters, key) != prefilters.end();
+    const bool resolve_pass = std::ranges::find(resolves, key) != resolves.end();
+    const auto previous = std::exchange(ocarina_prefilter, std::nullopt);
+    if (ocarina_depth && ++ocarina_depth_age > 512) {
+        ocarina_depth.reset();
+    }
+    const bool depth_pass = key == depth_a || key == depth_b;
+    if (!depth_pass && !prefilter_pass && !resolve_pass) {
+        return false;
+    }
+    const bool first_resolve = resolve_pass && !ocarina_resolve_seen;
+    if (first_resolve) {
+        ocarina_resolve_seen = true;
+        LOG_INFO(HW_GPU, "Recognized Ocarina 3D scene resolve {:016x} for NVIDIA DLSS", key);
+    }
+    const auto& cb = launch_description.const_buffer_config[0];
+    const u32 bytes = cb.size.Value();
+    if (!(launch_description.const_buffer_enable_mask & 1) ||
+        bytes != (depth_pass ? 0x200U : 0x100U) ||
+        !memory_manager.IsFullyMappedRange(cb.Address(), bytes)) {
+        if (first_resolve) {
+            LOG_WARNING(HW_GPU, "Ocarina DLSS: resolve constants unavailable (size {:#x})", bytes);
+        }
+        return false;
+    }
+    const auto get = [&](u32 offset) -> std::optional<Texture::TICEntry> {
+        const u32 handle = memory_manager.Read<u32>(cb.Address() + offset);
+        const u32 index = handle & 0xfffff;
+        if (!handle || index > regs.tic.limit ||
+            !memory_manager.IsFullyMappedRange(regs.tic.Address() +
+                                                   sizeof(Texture::TICEntry) * index,
+                                               sizeof(Texture::TICEntry))) {
+            return std::nullopt;
+        }
+        // Native descriptors already address the selected layer, just as in CreateImageView.
+        const auto tic = VideoCommon::TextureViewHeader(GetTICEntry(index),
+                                                        memory_manager.UsesNativeTiling());
+        return tic.Address() && tic.IsBlockLinear() ? std::optional{tic} : std::nullopt;
+    };
+    if (depth_pass) {
+        const auto depth = get(0x128);
+        if (depth && depth->format == Texture::TextureFormat::Z32) {
+            ocarina_depth = depth;
+            ocarina_depth_age = 0;
+        }
+        return false;
+    }
+    if (!ocarina_depth) {
+        if (first_resolve) {
+            LOG_WARNING(HW_GPU, "Ocarina DLSS: no matching scene depth before this resolve");
+        }
+        return false;
+    }
+    const auto input_size = [&](const Texture::TICEntry& tic) {
+        return tic.Width() == ocarina_depth->Width() && tic.Height() == ocarina_depth->Height();
+    };
+    if (prefilter_pass) {
+        const auto scene = get(0xa8);
+        const auto packed = get(0xd0);
+        if (scene && packed && scene->format == Texture::TextureFormat::B10G11R11 &&
+            packed->format == Texture::TextureFormat::R32 && input_size(*scene) &&
+            input_size(*packed)) {
+            ocarina_prefilter = OcarinaPrefilter{*scene, packed->Address()};
+        }
+        return false;
+    }
+    const auto packed = get(0xc0);
+    const auto output = get(0xd0);
+    if (first_resolve) {
+        LOG_INFO(HW_GPU, "Ocarina guest resolve: color {}x{}, depth {}x{}, output {}x{}",
+                 packed ? packed->Width() : 0, packed ? packed->Height() : 0,
+                 ocarina_depth->Width(), ocarina_depth->Height(),
+                 output ? output->Width() : 0, output ? output->Height() : 0);
+    }
+    if (!packed || !output || packed->format != Texture::TextureFormat::E5B9G9R9 ||
+        output->format != Texture::TextureFormat::B10G11R11 || !input_size(*packed) ||
+        output->Width() < packed->Width() || output->Height() < packed->Height() ||
+        std::abs(s64{output->Width()} * packed->Height() -
+                 s64{packed->Width()} * output->Height()) > output->Width()) {
+        return false;
+    }
+    const float detail = std::bit_cast<float>(memory_manager.Read<u32>(cb.Address() + 0x80));
+    if (!std::isfinite(detail) || detail < 0.f || detail > 8.f) {
+        return false;
+    }
+    VideoCore::Nx2Debug::ocarina_scene_resolves.fetch_add(1, std::memory_order_relaxed);
+    if (!rasterizer->UsesNvidiaDlss()) {
+        return false;
+    }
+    using VideoCore::Nx2Debug::OcarinaMode;
+    const auto mode = VideoCore::Nx2Debug::ocarina_mode.load(std::memory_order_relaxed);
+    if (mode == OcarinaMode::Guest) {
+        return false;
+    }
+    const auto& color = previous && previous->packed_address == packed->Address() &&
+                                mode != OcarinaMode::Packed
+                            ? previous->scene : *packed;
+    const bool replaced = rasterizer->TryOcarinaDlss(color, *ocarina_depth, *output,
+                                                     mode == OcarinaMode::NoDetail ? 0.f : detail);
+    if (first_resolve && !replaced) {
+        LOG_WARNING(HW_GPU, "Ocarina DLSS: renderer declined scene textures, running guest resolve");
+    }
+    return replaced;
 }
 
 // Logs the images a rejected program's handles (constant bank 0, bytes 0x80-0x11c) point to, so a

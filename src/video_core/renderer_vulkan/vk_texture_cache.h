@@ -17,6 +17,9 @@
 #include "shader_recompiler/shader_info.h"
 #include "video_core/renderer_vulkan/vk_compute_pass.h"
 #include "video_core/renderer_vulkan/vk_dlss_network_probe.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/renderer_vulkan/vk_ocarina_motion.h"
+#endif
 #include "video_core/renderer_vulkan/vk_fsr3_upscaler.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
@@ -150,6 +153,17 @@ public:
 
     /// True while TemporalUpscale would use NVIDIA DLSS (on, Streamline running, not failed).
     [[nodiscard]] bool UsesNvidiaDlss() const;
+#ifdef EGLANTINE_STREAMLINE
+    void SetOcarinaCamera(const std::optional<OcarinaCamera>& camera, u64 frame) {
+        ocarina_camera = camera;
+        ocarina_camera_frame = frame;
+    }
+    void SetOcarinaGeometry(std::span<const OcarinaGeometryDraw> draws) {
+        ocarina_geometry.assign(draws.begin(), draws.end());
+    }
+    bool OcarinaDlss(Framebuffer* dst, ImageView& color, ImageView& depth, std::array<u32, 2> size,
+                     float detail, std::array<float, 2> jitter, bool scene_reset);
+#endif
 
     /// Records a health check of a game's DLSS network output against its input (both sampled in
     /// the GENERAL layout) and returns an earlier check's result once the GPU has finished it.
@@ -261,15 +275,21 @@ public:
 
     /// Draws an upscaler's RGBA16F output into the DLSS output and returns it to GENERAL.
     void DrawUpscaledOutput(Framebuffer* dst_framebuffer, VkImageView view, VkImage image,
-                            VkSampler sampler);
+                            VkSampler sampler, float detail = 0.f);
 #ifdef EGLANTINE_STREAMLINE
     /// NVIDIA's DLSS (through NVIDIA Streamline) in place of the game's,
     /// before FSR 3.1, when the setting is on. Returns false to fall back to FSR 3.1.
     bool UpscaleWithDlss(Framebuffer* dst_framebuffer, ImageView& input_color,
-                         ImageView& motion_vectors, ImageView& depth,
+                         ImageView* motion_vectors, ImageView& depth,
                          std::array<u32, 2> render_size, std::array<f32, 2> jitter,
-                         std::array<f32, 2> motion_scale, bool reset);
+                         std::array<f32, 2> motion_scale, DlssDepth depth_direction, bool reset,
+                         float detail = 0.f);
     std::unique_ptr<StreamlineDlssUpscaler> dlss_upscaler;
+    std::unique_ptr<OcarinaMotion> ocarina_motion;
+    std::optional<OcarinaCamera> ocarina_camera;
+    u64 ocarina_camera_frame{};
+    std::vector<OcarinaGeometryDraw> ocarina_geometry;
+    std::optional<std::chrono::steady_clock::time_point> ocarina_last_frame;
     bool dlss_unsupported{};
 #endif
 

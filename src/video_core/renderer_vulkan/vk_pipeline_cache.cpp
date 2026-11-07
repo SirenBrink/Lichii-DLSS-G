@@ -201,6 +201,7 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
     const float point_size{std::bit_cast<float>(key.state.point_size)};
     switch (stage) {
     case Shader::Stage::VertexB:
+        info.capture_clip_vertices = key.state.capture_clip_vertices != 0;
         if (!has_geometry) {
             if (key.state.topology == Maxwell::PrimitiveTopology::Points) {
                 info.fixed_state_point_size = point_size;
@@ -1096,8 +1097,10 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineClean() {
     return result;
 }
 
-GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
-    if (PipelineCleanEnabled()) {
+GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline(bool capture_clip_vertices) {
+    if (!capture_clip_vertices && PipelineCleanEnabled()) {
+        // Instrumented and normal draws can have the same guest pipeline state.
+        graphics_key.state.capture_clip_vertices.Assign(0);
         return CurrentGraphicsPipelineClean();
     }
 
@@ -1109,6 +1112,11 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         graphics_key.state.attribute_types = vertex_attribute_types;
     }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    if (capture_clip_vertices && graphics_key.state.provoking_vertex_last &&
+        !device.SupportsTransformFeedbackProvokingVertexPreservation()) {
+        return nullptr;
+    }
+    graphics_key.state.capture_clip_vertices.Assign(capture_clip_vertices);
 
     if (dynamic_features.has_dynamic_vertex_input) {
         // Refresh only rewrites the types when the vertex input changes, so the masked copy in the
@@ -1374,6 +1382,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
             return;
         }
 
+        if (key.state.capture_clip_vertices) {
+            // Rebuild experimental capture variants only when the title requests them.
+            return;
+        }
         const bool key_uses_transform_feedback = key.state.xfb_enabled != 0;
         if (key_uses_transform_feedback && key_requests_provoking_last &&
             !dynamic_features.has_provoking_vertex_tf_preserve) {
@@ -1599,7 +1611,7 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto save_interval = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PipelineRetention)
                                    ? std::chrono::steady_clock::duration{std::chrono::seconds{15}}
                                    : std::chrono::steady_clock::duration{std::chrono::minutes{2}};
-    if (used_this_session.insert(pipeline.get()).second &&
+    if (!graphics_key.state.capture_clip_vertices && used_this_session.insert(pipeline.get()).second &&
         std::chrono::steady_clock::now() - used_pipelines_saved > save_interval) {
         SaveUsedPipelines();
     }
@@ -2068,7 +2080,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {
     ShaderPools& pools = emit_pools ? *emit_pools : main_pools;
     auto pipeline{CreateGraphicsPipeline(pools, graphics_key, environments.Span(), nullptr, true,
                                          std::move(emit_pools), std::move(reservation))};
-    if (!pipeline || pipeline_cache_filename.empty()) {
+    if (!pipeline || pipeline_cache_filename.empty() || graphics_key.state.capture_clip_vertices) {
         return pipeline;
     }
     if (disk_pipelines.contains(graphics_key.Hash())) {

@@ -16,7 +16,8 @@ namespace Vulkan {
 
 vk::Buffer CreateWrappedBuffer(MemoryAllocator& allocator, VkDeviceSize size, MemoryUsage usage);
 
-vk::Image CreateWrappedImage(MemoryAllocator& allocator, VkExtent2D dimensions, VkFormat format);
+vk::Image CreateWrappedImage(MemoryAllocator& allocator, VkExtent2D dimensions, VkFormat format,
+                             VkImageUsageFlags extra_usage = 0);
 void TransitionImageLayout(vk::CommandBuffer& cmdbuf, VkImage image, VkImageLayout target_layout,
                            VkImageLayout source_layout = VK_IMAGE_LAYOUT_GENERAL);
 void UploadImage(const Device& device, MemoryAllocator& allocator, Scheduler& scheduler,
@@ -49,7 +50,10 @@ vk::PipelineLayout CreateWrappedPipelineLayout(const Device& device,
                                                vk::DescriptorSetLayout& layout);
 vk::Pipeline CreateWrappedPipeline(const Device& device, vk::RenderPass& renderpass,
                                    vk::PipelineLayout& layout,
-                                   std::tuple<vk::ShaderModule&, vk::ShaderModule&> shaders);
+                                   std::tuple<vk::ShaderModule&, vk::ShaderModule&> shaders,
+                                   const VkPipelineVertexInputStateCreateInfo* vertex_input = nullptr,
+                                   VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+                                   const VkPipelineDepthStencilStateCreateInfo* depth_state = nullptr);
 vk::Pipeline CreateWrappedComputePipeline(const Device& device, vk::PipelineLayout& layout,
                                           VkShaderModule shader);
 vk::Pipeline CreateWrappedPremultipliedBlendingPipeline(

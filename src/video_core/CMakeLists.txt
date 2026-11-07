@@ -542,6 +542,7 @@ cmake_dependent_option(ENABLE_NVIDIA_DLSS "Enable NVIDIA DLSS through NVIDIA Str
 set(EGLANTINE_STREAMLINE_SDK "" CACHE PATH
     "NVIDIA Streamline SDK directory for its headers (empty: download them)")
 if (ENABLE_NVIDIA_DLSS)
+    target_compile_definitions(common PRIVATE EGLANTINE_STREAMLINE)
     if (EGLANTINE_STREAMLINE_SDK)
         set(STREAMLINE_INCLUDE_DIR "${EGLANTINE_STREAMLINE_SDK}/include")
     else()
@@ -549,6 +550,9 @@ if (ENABLE_NVIDIA_DLSS)
         set(STREAMLINE_INCLUDE_DIR "${streamline_SOURCE_DIR}/include")
     endif()
     target_sources(video_core PRIVATE
+        renderer_vulkan/vk_ocarina_motion.cpp
+        renderer_vulkan/vk_ocarina_skin_capture.cpp
+        renderer_vulkan/vk_ocarina_geometry_pass.cpp
         renderer_vulkan/vk_streamline_dlss.cpp
         renderer_vulkan/vk_streamline_dlss.h
         vulkan_common/streamline.cpp

@@ -130,7 +130,7 @@ public:
                            TextureCache& texture_cache, VideoCore::ShaderNotify& shader_notify_);
     ~PipelineCache();
 
-    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
+    [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline(bool capture_clip_vertices = false);
 
     void TickFrame();
 

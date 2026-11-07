@@ -22,6 +22,7 @@ struct DlssFiles {
     std::filesystem::path interposer; ///< sl.interposer.dll (Streamline's loader)
     std::filesystem::path model;      ///< nvngx_dlss.dll next to the loader
     std::filesystem::path app_model;  ///< Newest DLSS the NVIDIA app downloaded
+    bool generation_files{};         ///< Complete local SR/FG/Reflex runtime set
     std::string interposer_version;
     std::string model_version;
     std::string app_model_version;
@@ -52,10 +53,21 @@ bool Start();
 /// Hands the renderer's device to Streamline and routes the swapchain calls through it, as
 /// Streamline's manual hooking needs. Stops Streamline and returns false when DLSS can't run.
 bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice device,
-                  u32 graphics_family, vk::DeviceDispatch& dld);
+                  u32 graphics_family, u32 present_family, vk::DeviceDispatch& dld);
 
 /// Whether DLSS can run on the attached device.
 [[nodiscard]] bool IsDlssAvailable();
+
+[[nodiscard]] bool FrameGenerationRequested();
+[[nodiscard]] bool IsDlssGAvailable();
+// The interposer negotiates its own Vulkan extension, queue and feature requirements when it
+// creates the rendering instance/device. Keep frontend adapter queries on their native dispatch.
+[[nodiscard]] PFN_vkGetInstanceProcAddr FrameGenerationInstanceLoader();
+void BeginFrameGenerationRender();
+void BeginFrameGenerationPresent(u32 width, u32 height, u32 left, u32 top, u32 view_width,
+                                 u32 view_height);
+void EndFrameGenerationPresent(bool present_succeeded);
+void DisableFrameGeneration();
 
 /// Shuts Streamline down; call before the device is destroyed.
 void Stop();

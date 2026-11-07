@@ -17,6 +17,7 @@
 #include "common/common_types.h"
 #include "common/polyfill_thread.h"
 #include "video_core/renderer_vulkan/vk_host_pacer.h"
+#include "common/math_util.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -44,6 +45,7 @@ struct Frame {
     bool storage_capable{};
     u64 render_tick{};                               ///< Scheduler tick that renders the frame
     std::chrono::steady_clock::time_point queued_at; ///< When it reached the present queue
+    Common::Rectangle<u32> scene_rect{};
 };
 
 class PresentManager {

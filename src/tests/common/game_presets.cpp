@@ -3,6 +3,7 @@
 #include <memory>
 #include <catch2/catch_test_macros.hpp>
 #include "common/game_presets.h"
+#include "common/scope_exit.h"
 
 namespace {
 void SetConflictingPreferences(Settings::Values& settings, bool per_game) {
@@ -108,4 +109,45 @@ TEST_CASE("Declining the MKW preset preserves global and per-game preferences", 
         CHECK(settings->renderer_backend.UsingGlobal() == !per_game);
         CHECK(settings->resolution_setup.UsingGlobal() == !per_game);
     }
+}
+
+TEST_CASE("Ocarina DLSS quality follows persisted selection and renderer", "[game_presets][oot_dlss]") {
+    using namespace Settings;
+    auto& renderer = values.renderer_backend;
+    auto& dlss = values.nvidia_dlss;
+    auto& quality = values.ocarina_dlss_quality;
+    const auto saved_renderer = renderer.GetValue();
+    const auto saved_dlss = dlss.GetValue();
+    const auto saved_quality = quality.GetValue();
+    SCOPE_EXIT {
+        renderer.SetValue(saved_renderer);
+        dlss.SetValue(saved_dlss);
+        quality.SetValue(saved_quality);
+    };
+
+    CHECK(quality.GetDefault() == OcarinaDlssQuality::Auto);
+    CHECK_FALSE(values.ocarina_dlss_frame_generation.GetDefault());
+    dlss.SetValue(true);
+    renderer.SetValue(RendererBackend::Vulkan);
+    for (const auto& [selection, scale] : {
+             std::pair{OcarinaDlssQuality::Auto, 0.f},
+             std::pair{OcarinaDlssQuality::Quality, 2.f / 3.f},
+             std::pair{OcarinaDlssQuality::Balanced, 7.f / 12.f},
+             std::pair{OcarinaDlssQuality::Dlaa, 1.f}}) {
+        quality.SetValue(selection);
+        const std::string stored = quality.ToString();
+        quality.SetValue(OcarinaDlssQuality::Auto);
+        quality.LoadString(stored);
+        CHECK(quality.GetValue() == selection);
+#ifdef EGLANTINE_STREAMLINE
+        CHECK(OcarinaDlssInputScale() == scale);
+#else
+        CHECK(OcarinaDlssInputScale() == 0.f);
+#endif
+    }
+    renderer.SetValue(RendererBackend::Null);
+    CHECK(OcarinaDlssInputScale() == 0.f);
+    renderer.SetValue(RendererBackend::Vulkan);
+    dlss.SetValue(false);
+    CHECK(OcarinaDlssInputScale() == 0.f);
 }

@@ -25,7 +25,8 @@ vk::Buffer CreateWrappedBuffer(MemoryAllocator& allocator, VkDeviceSize size, Me
     return allocator.CreateBuffer(dst_buffer_info, usage);
 }
 
-vk::Image CreateWrappedImage(MemoryAllocator& allocator, VkExtent2D dimensions, VkFormat format) {
+vk::Image CreateWrappedImage(MemoryAllocator& allocator, VkExtent2D dimensions, VkFormat format,
+                             VkImageUsageFlags extra_usage) {
     const VkImageCreateInfo image_ci{
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .pNext = nullptr,
@@ -38,7 +39,7 @@ vk::Image CreateWrappedImage(MemoryAllocator& allocator, VkExtent2D dimensions, 
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | extra_usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -399,7 +400,10 @@ vk::PipelineLayout CreateWrappedPipelineLayout(const Device& device,
 static vk::Pipeline CreateWrappedPipelineImpl(
     const Device& device, vk::RenderPass& renderpass, vk::PipelineLayout& layout,
     std::tuple<vk::ShaderModule&, vk::ShaderModule&> shaders,
-    VkPipelineColorBlendAttachmentState blending) {
+    VkPipelineColorBlendAttachmentState blending,
+    const VkPipelineVertexInputStateCreateInfo* vertex_input = nullptr,
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+    const VkPipelineDepthStencilStateCreateInfo* depth_state = nullptr) {
     const std::array<VkPipelineShaderStageCreateInfo, 2> shader_stages{{
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -435,8 +439,8 @@ static vk::Pipeline CreateWrappedPipelineImpl(
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-        .primitiveRestartEnable = device.IsMoltenVK() ? VK_TRUE : VK_FALSE,
+        .topology = topology,
+        .primitiveRestartEnable = device.IsMoltenVK() && topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
     };
 
     constexpr VkPipelineViewportStateCreateInfo viewport_state_ci{
@@ -507,13 +511,13 @@ static vk::Pipeline CreateWrappedPipelineImpl(
         .flags = 0,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
-        .pVertexInputState = &vertex_input_ci,
+        .pVertexInputState = vertex_input ? vertex_input : &vertex_input_ci,
         .pInputAssemblyState = &input_assembly_ci,
         .pTessellationState = nullptr,
         .pViewportState = &viewport_state_ci,
         .pRasterizationState = &rasterization_ci,
         .pMultisampleState = &multisampling_ci,
-        .pDepthStencilState = nullptr,
+        .pDepthStencilState = depth_state,
         .pColorBlendState = &color_blend_ci,
         .pDynamicState = &dynamic_state_ci,
         .layout = *layout,
@@ -526,7 +530,10 @@ static vk::Pipeline CreateWrappedPipelineImpl(
 
 vk::Pipeline CreateWrappedPipeline(const Device& device, vk::RenderPass& renderpass,
                                    vk::PipelineLayout& layout,
-                                   std::tuple<vk::ShaderModule&, vk::ShaderModule&> shaders) {
+                                   std::tuple<vk::ShaderModule&, vk::ShaderModule&> shaders,
+                                   const VkPipelineVertexInputStateCreateInfo* vertex_input,
+                                   VkPrimitiveTopology topology,
+                                   const VkPipelineDepthStencilStateCreateInfo* depth_state) {
     constexpr VkPipelineColorBlendAttachmentState color_blend_attachment_disabled{
         .blendEnable = VK_FALSE,
         .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
@@ -540,7 +547,7 @@ vk::Pipeline CreateWrappedPipeline(const Device& device, vk::RenderPass& renderp
     };
 
     return CreateWrappedPipelineImpl(device, renderpass, layout, shaders,
-                                     color_blend_attachment_disabled);
+                                     color_blend_attachment_disabled, vertex_input, topology, depth_state);
 }
 
 vk::Pipeline CreateWrappedPremultipliedBlendingPipeline(

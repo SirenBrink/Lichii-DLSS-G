@@ -215,6 +215,7 @@ struct FixedPipelineState {
         BitField<20, 1, u32> color_write_enable_dynamic;
 
         BitField<21, 1, u32> attachment0_dual_source_blend;
+        BitField<22, 1, u32> capture_clip_vertices;
 
         BitField<24, 4, Maxwell::PrimitiveTopology> topology;
         BitField<28, 4, Tegra::Texture::MsaaMode> msaa_mode;

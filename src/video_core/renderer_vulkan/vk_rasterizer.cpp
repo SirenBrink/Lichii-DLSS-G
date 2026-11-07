@@ -25,11 +25,15 @@
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
 #include "common/assert.h"
+#include "common/cityhash.h"
 #include "common/dkb_frame_trace.h"
 #include "shader_recompiler/exception.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/control/channel_state.h"
@@ -86,6 +90,36 @@ bool InvalidateBeforeUse() {
     }();
     return enabled;
 }
+
+#ifdef EGLANTINE_STREAMLINE
+enum class OcarinaSkinGroup { None, Character, Equipment };
+
+OcarinaSkinGroup ClassifyOcarinaSkin(const Tegra::Engines::Maxwell3D& engine, u64 vs) {
+    u32 palette_size;
+    switch (vs) {
+    case 0xcdc065f200c9d3eaULL:
+    case 0xf7b8b5b55175c6acULL:
+    case 0xdb589efc6c2c9a21ULL:
+    case 0x16bd554a57a03d5cULL:
+        return OcarinaSkinGroup::Character;
+    case 0x245b15c264c49d0aULL:
+        palette_size = 512;
+        break;
+    case 0x63f1008a3fb64f13ULL:
+    case 0x5f4e9522ea541a12ULL:
+        palette_size = 256;
+        break;
+    default:
+        return OcarinaSkinGroup::None;
+    }
+    // The same programs draw full skeletons; only their compact VS palette
+    // bindings were observed on the small skinned attachments.
+    const auto& palette = engine.state.shader_stages[0].const_buffers[6];
+    return palette.enabled && palette.address && palette.size == palette_size
+               ? OcarinaSkinGroup::Equipment : OcarinaSkinGroup::None;
+}
+
+#endif
 
 /// read_gpu_memory: the first address space (the bound channel's first) that maps the whole range,
 /// read as the GPU reads it, without flushing GPU caches.
@@ -265,6 +299,7 @@ bool IsPrimitiveRestartSupported(const Device& device, VkPrimitiveTopology topol
 }
 } // Anonymous namespace
 
+
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
                                    Tegra::MaxwellDeviceMemoryManager& device_memory_,
                                    const Device& device_, MemoryAllocator& memory_allocator_,
@@ -402,8 +437,13 @@ bool RasterizerVulkan::TryNx2IndirectReset(bool is_indexed, u32 instance_count) 
 }
 
 template <typename Func>
-void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect) {
+void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_indirect, u32 instances) {
 
+#ifdef EGLANTINE_STREAMLINE
+    if (capture_fg_camera && ocarina_sampling.depth && is_indexed) {
+        CaptureOcarinaCamera();
+    }
+#endif
     if (Common::DkbFrameTrace::Enabled()) {
         ++trace_draws;
     }
@@ -452,7 +492,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                         regs.rt[0].Address(), regs.rt[0].width, regs.rt[0].height);
         }
     };
-    GraphicsPipeline* const pipeline{[&] {
+    GraphicsPipeline* pipeline{[&] {
         Profile::Scope scope{Profile::Zone::PipelineLookup};
         return pipeline_cache.CurrentGraphicsPipeline();
     }()};
@@ -461,6 +501,19 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         TraceRenderState(is_indexed, "no-pipeline", nullptr);
         return;
     }
+#ifdef EGLANTINE_STREAMLINE
+    skin_binding = {};
+    if (capture_geometry && is_indexed && !is_indirect && instances == 1) {
+        const auto binding = PrepareOcarinaCapture(pipeline->ShaderHashes());
+        if (binding.buffer) {
+            if (auto* variant = pipeline_cache.CurrentGraphicsPipeline(true);
+                variant && variant->IsBuilt()) {
+                pipeline = variant;
+                skin_binding = binding;
+            }
+        }
+    }
+#endif
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
     // EDEN_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
@@ -959,13 +1012,24 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             });
             return;
         }
-        scheduler.Record([this, draw_params, hashes = trace_draw_hashes](vk::CommandBuffer cmdbuf) {
+        scheduler.Record([this, draw_params, hashes = trace_draw_hashes
+#ifdef EGLANTINE_STREAMLINE
+                          , capture = skin_binding
+#endif
+                          ](vk::CommandBuffer cmdbuf) {
             if (scheduler.GraphicsPipelineMissing()) {
                 return;
             }
             scheduler.TraceGpuWork(
                 cmdbuf, hashes.first, hashes.second,
                 {draw_params.num_vertices, draw_params.num_instances, 0}, [&] {
+#ifdef EGLANTINE_STREAMLINE
+                    if (capture.buffer) {
+                        cmdbuf.BindTransformFeedbackBuffersEXT(0, 1, &capture.buffer, &capture.offset,
+                                                              &capture.bytes);
+                        cmdbuf.BeginTransformFeedbackEXT(0, 0, nullptr, nullptr);
+                    }
+#endif
                     if (draw_params.is_indexed) {
                         cmdbuf.DrawIndexed(draw_params.num_vertices, draw_params.num_instances,
                                            draw_params.first_index, draw_params.base_vertex,
@@ -974,6 +1038,11 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
                         cmdbuf.Draw(draw_params.num_vertices, draw_params.num_instances,
                                     draw_params.base_vertex, draw_params.base_instance);
                     }
+#ifdef EGLANTINE_STREAMLINE
+                    if (capture.buffer) {
+                        cmdbuf.EndTransformFeedbackEXT(0, 0, nullptr, nullptr);
+                    }
+#endif
                 });
         });
 
@@ -990,7 +1059,7 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
             GPU::Logging::GPULogger::GetInstance().LogVulkanCall(
                 is_indexed ? "vkCmdDrawIndexed" : "vkCmdDraw", params, VK_SUCCESS);
         }
-    });
+    }, false, instance_count);
 }
 
 void RasterizerVulkan::DrawIndirect() {
@@ -2364,6 +2433,194 @@ std::optional<VideoCore::GameDlssProbe> RasterizerVulkan::ProbeGameDlssOutput(
     const Tegra::Engines::Fermi2D::Surface& src, const Tegra::Engines::Fermi2D::Surface& dst) {
     std::scoped_lock lock{texture_cache.mutex};
     return texture_cache.ProbeGameDlssOutput(dst, src);
+}
+
+#ifdef EGLANTINE_STREAMLINE
+OcarinaSkinCapture::Binding RasterizerVulkan::PrepareOcarinaCapture(
+    const std::array<u64, 6>& shaders) {
+    const auto group = ClassifyOcarinaSkin(*maxwell3d, shaders[1]);
+    // Additional skinning programs seen in the isolated actor pass alongside
+    // Link and the Kokiri NPC. Other rigid meshes must show a changing model
+    // transform in the opaque depth prepass before they may use this budget.
+    constexpr std::array<u64, 13> actor_programs{
+        0xdabfc1120e24e52dULL, 0x5f4e9522ea541a12ULL, 0x245b15c264c49d0aULL,
+        0xa495c14495fd071aULL, 0x7ba00da02b6bac48ULL, 0xaf7a98b48492ed65ULL,
+        0xe980f097a9eb5cfeULL, 0x63f1008a3fb64f13ULL, 0x47e9afbefc1fec5eULL,
+        0x95e8e1359184886bULL, 0xb32112dc70adcb87ULL, 0x7a72a562960a9588ULL,
+        0x89a43748c71a92d3ULL};
+    const bool extra = group == OcarinaSkinGroup::None;
+    const bool actor = extra && std::ranges::find(actor_programs, shaders[1]) != actor_programs.end();
+    if (shaders[0] || shaders[2] || shaders[3] || shaders[4] || !shaders[1] ||
+        (extra && !actor && shaders[5] != 0x292b3848bd8c1dbfULL)) {
+        return {};
+    }
+    const auto& regs = maxwell3d->regs;
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const auto& vp = regs.viewport_transform[0];
+    const auto viewport = GetViewportState(device, regs, 0, 1.f);
+    const float width = float(ocarina_sampling.width), height = float(ocarina_sampling.height);
+    const auto reject = [&](std::string_view reason) {
+        if (skin_candidate_reports++ < 12) {
+            LOG_INFO(Render_Vulkan, "Ocarina geometry skipped {:016x}: {} (Z {:x}, {}x{}, "
+                     "viewport {}x{}, restart {}, topology {}, count {})", shaders[1], reason,
+                     regs.zeta.Address(), regs.zeta_size.width, regs.zeta_size.height,
+                     viewport.width, viewport.height, regs.primitive_restart.enabled,
+                     static_cast<u32>(draw.topology), draw.index_buffer.count);
+        }
+        return OcarinaSkinCapture::Binding{};
+    };
+    if (draw.topology != Maxwell::PrimitiveTopology::Triangles || !draw.inline_index_draw_indexes.empty() ||
+        !draw.index_buffer.StartAddress() || draw.index_buffer.count < 3 ||
+        draw.index_buffer.count % 3 || regs.transform_feedback_enabled ||
+        (regs.primitive_restart.enabled && device.IsTopologyListPrimitiveRestartSupported()) ||
+        !regs.zeta_enable || regs.zeta.format != Tegra::DepthFormat::Z32_FLOAT ||
+        !regs.depth_write_enabled || !regs.viewport_scale_offset_enabled ||
+        regs.depth_mode != Maxwell::DepthMode::MinusOneToOne ||
+        vp.swizzle.x != Maxwell::ViewportSwizzle::PositiveX ||
+        (vp.swizzle.y != Maxwell::ViewportSwizzle::PositiveY &&
+         vp.swizzle.y != Maxwell::ViewportSwizzle::NegativeY) ||
+        vp.swizzle.z != Maxwell::ViewportSwizzle::PositiveZ ||
+        vp.swizzle.w != Maxwell::ViewportSwizzle::PositiveW) {
+        return reject("not a direct scene depth triangle list");
+    }
+    if (!width || !height || std::abs(std::abs(viewport.width) - width) > 1.f ||
+        std::abs(std::abs(viewport.height) - height) > 1.f ||
+        std::abs(viewport.x + viewport.width * .5f - width * .5f) > .5f ||
+        std::abs(viewport.y + viewport.height * .5f - height * .5f) > .5f ||
+        std::abs(viewport.minDepth) > .0001f || std::abs(viewport.maxDepth - 1.f) > .0001f) {
+        return reject("viewport differs from scene");
+    }
+    const auto& cb = maxwell3d->state.shader_stages[0].const_buffers[3];
+    OcarinaCamera camera{};
+    constexpr size_t size = 0x70 + sizeof(camera.projection);
+    if (!cb.enabled || !cb.address || cb.size < size || !gpu_memory->IsFullyMappedRange(cb.address, size)) {
+        return reject("missing camera block");
+    }
+    gpu_memory->ReadBlockUnsafe(cb.address, camera.view.data(), sizeof(camera.view));
+    gpu_memory->ReadBlockUnsafe(cb.address + 0x70, camera.projection.data(), sizeof(camera.projection));
+    if (!camera.MatchesScene(width / height)) {
+        return reject("non-scene projection");
+    }
+    // GetViewportState already handles the software swizzle fallback.
+    const bool hw_flip = device.IsNvViewportSwizzleSupported() &&
+                         vp.swizzle.y == Maxwell::ViewportSwizzle::NegativeY;
+    camera.viewport_sign = {std::copysign(1.f, viewport.width),
+                            std::copysign(1.f, viewport.height) * (hw_flip ? -1.f : 1.f)};
+    std::optional<u64> rigid_transform;
+    if (extra && !actor) {
+        const auto& model = maxwell3d->state.shader_stages[0].const_buffers[4];
+        std::array<u32, 19> transform{}; // affine matrix and world-origin offset
+        if (!model.enabled || model.size < sizeof(transform) || !model.address ||
+            !gpu_memory->IsFullyMappedRange(model.address, sizeof(transform))) return {};
+        gpu_memory->ReadBlockUnsafe(model.address, transform.data(), sizeof(transform));
+        rigid_transform = Common::CityHash64(reinterpret_cast<const char*>(transform.data()), sizeof(transform));
+    }
+    if (!skin_capture) {
+        if (device.GetPhysical().GetProperties().limits.maxVertexOutputComponents < 125) {
+            return reject("vertex output limit");
+        }
+        try {
+            skin_capture = std::make_unique<OcarinaSkinCapture>(memory_allocator, scheduler);
+        } catch (const vk::Exception& e) {
+            LOG_WARNING(Render_Vulkan, "Ocarina geometry capture allocation failed ({})", e.what());
+            capture_geometry = false;
+            skin_allocation_failed = true;
+            return {};
+        }
+        LOG_INFO(Render_Vulkan, "Ocarina geometry: capturing post-skinning position and vertex ID");
+    }
+    return skin_capture->Reserve(render_trace_frame, *maxwell3d, shaders,
+                                 device.IsExtDepthClipControlSupported(), camera,
+                                 group == OcarinaSkinGroup::Equipment ? OcarinaGeometryKind::Equipment :
+                                 extra ? OcarinaGeometryKind::Other : OcarinaGeometryKind::Character,
+                                 rigid_transform);
+}
+
+void RasterizerVulkan::CaptureOcarinaCamera() {
+    if (ocarina_camera_frame != render_trace_frame) {
+        ocarina_camera.reset();
+        ocarina_camera_buffer = 0;
+        ocarina_camera_frame = render_trace_frame;
+    }
+    const auto& regs = maxwell3d->regs;
+    if (ocarina_camera || regs.zeta.Address() != ocarina_sampling.depth ||
+        !regs.rt_control.count || regs.rt_control.count > 8 ||
+        regs.depth_mode != Maxwell::DepthMode::MinusOneToOne ||
+        std::abs(regs.viewport_transform[0].scale_z - 0.5f) > 0.001f ||
+        std::abs(regs.viewport_transform[0].translate_z - 0.5f) > 0.001f) {
+        return;
+    }
+    const auto& color = regs.rt[regs.rt_control.Map(0)];
+    if (color.width != ocarina_sampling.width || color.height != ocarina_sampling.height) {
+        return;
+    }
+    const auto& cb = maxwell3d->state.shader_stages[0].const_buffers[3];
+    constexpr size_t proj_offset = 0x70;
+    constexpr size_t required = proj_offset + sizeof(OcarinaCamera::projection);
+    if (!cb.enabled || !cb.address || cb.address == ocarina_camera_buffer ||
+        cb.size < required || !gpu_memory->IsFullyMappedRange(cb.address, required)) {
+        return;
+    }
+    ocarina_camera_buffer = cb.address;
+    OcarinaCamera candidate{};
+    const auto& vp = regs.viewport_transform[0];
+    if (vp.swizzle.x != Maxwell::ViewportSwizzle::PositiveX ||
+        (vp.swizzle.y != Maxwell::ViewportSwizzle::PositiveY &&
+         vp.swizzle.y != Maxwell::ViewportSwizzle::NegativeY) ||
+        std::abs(std::abs(vp.scale_x) * 2.f - color.width) > 1.f ||
+        std::abs(std::abs(vp.scale_y) * 2.f - color.height) > 1.f) {
+        return;
+    }
+    const bool flip_y = (regs.window_origin.mode != Maxwell::WindowOrigin::Mode::UpperLeft) !=
+                        (vp.swizzle.y == Maxwell::ViewportSwizzle::NegativeY);
+    candidate.viewport_sign = {std::copysign(1.f, vp.scale_x),
+                               std::copysign(1.f, vp.scale_y) * (flip_y ? -1.f : 1.f)};
+    gpu_memory->ReadBlockUnsafe(cb.address, candidate.view.data(), sizeof(candidate.view));
+    gpu_memory->ReadBlockUnsafe(cb.address + proj_offset, candidate.projection.data(),
+                                sizeof(candidate.projection));
+    if (candidate.MatchesScene(float(color.width) / float(color.height))) {
+        ocarina_camera = candidate;
+    }
+}
+#endif
+
+bool RasterizerVulkan::TryOcarinaDlss(const Tegra::Texture::TICEntry& color,
+                                      const Tegra::Texture::TICEntry& depth,
+                                      const Tegra::Texture::TICEntry& output, float detail) {
+#ifdef EGLANTINE_STREAMLINE
+    std::scoped_lock lock{texture_cache.mutex};
+    auto& sampling = ocarina_sampling;
+    capture_fg_camera = Streamline::IsDlssGAvailable();
+    static const bool geometry_enabled = [] {
+        const char* value = std::getenv("EDEN_OOT_DLSSG_GEOMETRY");
+        return !value || std::string_view{value} != "0";
+    }();
+    capture_geometry = geometry_enabled && capture_fg_camera && !skin_allocation_failed &&
+                       (program_id == 0x0400486024DEC000ULL ||
+                        (!program_id && Settings::GetCurrentProgramID() == 0x0400486024DEC000ULL)) &&
+                       device.IsExtTransformFeedbackSupported();
+    if (capture_fg_camera) {
+        const bool same_scene = ocarina_camera_frame == render_trace_frame &&
+                                sampling.depth == depth.Address();
+        const auto camera = same_scene ? ocarina_camera : std::nullopt;
+        texture_cache_runtime.SetOcarinaCamera(camera, render_trace_frame);
+        texture_cache_runtime.SetOcarinaGeometry(skin_capture && capture_geometry
+            ? skin_capture->Pairs(render_trace_frame, camera) : std::span<const OcarinaGeometryDraw>{});
+    }
+    const bool continuous = sampling.depth == depth.Address() && sampling.width == color.Width() &&
+                            sampling.height == color.Height() &&
+                            render_trace_frame - sampling.last_frame <= 2;
+    // Only the guest projection can keep all depth and lighting passes on the same sample.
+    // Until its offset is known, use the unmodified viewport and report zero host jitter.
+    const bool submitted = texture_cache.OcarinaDlss(color, depth, output, detail, {}, !continuous);
+    sampling.depth = submitted ? depth.Address() : 0;
+    sampling.width = color.Width();
+    sampling.height = color.Height();
+    sampling.last_frame = render_trace_frame;
+    return submitted;
+#else
+    return false;
+#endif
 }
 
 bool RasterizerVulkan::AccelerateTemporalUpscale(

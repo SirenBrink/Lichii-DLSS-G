@@ -155,6 +155,10 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place "
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
+    INSERT(Settings, ocarina_dlss_quality, tr("Ocarina of Time DLSS quality"),
+           tr("Choose the render scale used by the Ocarina resolution add-on when NVIDIA DLSS is enabled. DLAA uses the full output resolution. Restart the game to apply."));
+    INSERT(Settings, ocarina_dlss_frame_generation, tr("Ocarina of Time NVIDIA Frame Generation"),
+           tr("Generate additional frames on supported GeForce RTX hardware using Ocarina's scene depth and motion. Requires NVIDIA DLSS and the Streamline frame-generation files. Restart the game to apply."));
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "
@@ -546,6 +550,13 @@ std::unique_ptr<ComboboxTranslationMap> ComboboxEnumeration(QObject* parent) {
                               PAIR(AspectRatio, R21_9, tr("Force 21:9")),
                               PAIR(AspectRatio, R16_10, tr("Force 16:10")),
                               PAIR(AspectRatio, Stretch, tr("Stretch to Window")),
+                          }});
+    translations->insert({Settings::EnumMetadata<Settings::OcarinaDlssQuality>::Index(),
+                          {
+                              PAIR(OcarinaDlssQuality, Auto, tr("Automatic (game render size)")),
+                              PAIR(OcarinaDlssQuality, Quality, tr("Quality")),
+                              PAIR(OcarinaDlssQuality, Balanced, tr("Balanced")),
+                              PAIR(OcarinaDlssQuality, Dlaa, tr("DLAA (native resolution)")),
                           }});
     translations->insert({Settings::EnumMetadata<Settings::AnisotropyMode>::Index(),
                           {

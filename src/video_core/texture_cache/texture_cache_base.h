@@ -301,6 +301,8 @@ public:
 
     /// Stand-in for a DLSS evaluation: temporal upscale of src into dst (see the runtime's
     /// TemporalUpscale). False when unsupported; the caller retains its native dispatch.
+    bool OcarinaDlss(const TICEntry& color, const TICEntry& depth, const TICEntry& output,
+                     float detail, std::array<float, 2> jitter, bool reset);
     bool TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& dst,
                          const Tegra::Engines::Fermi2D::Surface& src,
                          const Tegra::Engines::Fermi2D::Surface& motion_vectors,

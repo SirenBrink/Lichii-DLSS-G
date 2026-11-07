@@ -114,6 +114,7 @@ struct TemporalUpscalePushConstants {
 struct TemporalSharpenPushConstants {
     PushConstants vertex;
     std::array<u32, 4> rcas;
+    float ocarina_detail;
 };
 
 struct MSAACopyPushConstants {
@@ -857,13 +858,15 @@ void BlitImageHelper::TemporalUpscale(const Framebuffer* dst_framebuffer,
 }
 
 void BlitImageHelper::TemporalSharpen(const Framebuffer* dst_framebuffer, VkImageView source,
-                                      const Region2D& dst_region, f32 sharpness) {
+                                      const Region2D& dst_region, f32 sharpness,
+                                      float ocarina_detail) {
     const VkPipelineLayout layout = *temporal_sharpen_pipeline_layout;
     const VkPipeline pipeline = FindOrEmplaceTemporalSharpenPipeline(dst_framebuffer->RenderPass());
     const VkSampler sampler = *nearest_sampler;
     TemporalSharpenPushConstants push_constants{
         .vertex = {.tex_scale = {1.0f, 1.0f}, .tex_offset = {0.0f, 0.0f}},
         .rcas = {},
+        .ocarina_detail = ocarina_detail,
     };
     FSR::FsrRcasCon(push_constants.rcas.data(), sharpness);
     scheduler.RequestRenderpass(dst_framebuffer);

@@ -259,6 +259,15 @@ set_target_properties(yuzu PROPERTIES OUTPUT_NAME "lichii")
 
 # Shipped next to the executable: the NX2 switches a GUI launch cannot set another way. Read at
 # startup (LoadNx2Switches in main.cpp); a user copy in %APPDATA%\eden overrides it.
+if (WIN32 AND ENABLE_NVIDIA_DLSS)
+    set(nvidia_installer_files
+        "${PROJECT_SOURCE_DIR}/dist/windows/Install NVIDIA DLSS.cmd"
+        "${PROJECT_SOURCE_DIR}/dist/windows/Install-NvidiaRuntime.ps1")
+    add_custom_command(TARGET yuzu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${nvidia_installer_files} "$<TARGET_FILE_DIR:yuzu>"
+        VERBATIM)
+endif()
+
 add_custom_command(TARGET yuzu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt" "$<TARGET_FILE_DIR:yuzu>/nx2_switches.txt"

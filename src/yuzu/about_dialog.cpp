@@ -28,6 +28,11 @@ AboutDialog::AboutDialog(QWidget* parent)
     if (!yuzu_logo.isNull()) {
         ui->labelLogo->setPixmap(yuzu_logo.pixmap(200));
     }
+#ifdef EGLANTINE_STREAMLINE
+    ui->labelAbout->setText(ui->labelAbout->text() +
+        tr("<p>Optional NVIDIA RTX™ DLSS and NVIDIA Reflex support uses NVIDIA Streamline. "
+           "NVIDIA, GeForce RTX, DLSS and Reflex are trademarks of NVIDIA Corporation.</p>"));
+#endif
     ui->labelBuildInfo->setText(
         ui->labelBuildInfo->text().arg(QString::fromStdString(yuzu_build_version),
                                        QString::fromUtf8(Common::g_build_date).left(10)));

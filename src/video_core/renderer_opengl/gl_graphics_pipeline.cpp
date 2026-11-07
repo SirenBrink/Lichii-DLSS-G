@@ -185,7 +185,8 @@ GraphicsPipeline::GraphicsPipeline(const Device& device, TextureCache& texture_c
                                    const std::array<const Shader::Info*, 5>& infos,
                                    const GraphicsPipelineKey& key_, bool force_context_flush)
     : texture_cache{texture_cache_}, buffer_cache{buffer_cache_}, program_manager{program_manager_},
-      state_tracker{state_tracker_}, key{key_} {
+      state_tracker{state_tracker_}, key{key_},
+      storage_buffer_alignment{device.GetShaderStorageBufferAlignment()} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -311,14 +312,16 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         const auto& cbufs{maxwell3d->state.shader_stages[stage].const_buffers};
         const auto read_handle{[&](const auto& desc, u32 index) {
             if (desc.handle_program != ~0U) {
-                // Read by the shader from a storage buffer: computed for this draw.
+                // Read by the shader from a storage buffer: computed for this draw (for an
+                // array, for each element).
                 return TexturePair(VideoCommon::EvaluateTextureHandle(
                                        info, desc.handle_program, *gpu_memory,
                                        [&](u32 cbuf) -> GPUVAddr {
                                            return cbuf < cbufs.size() && cbufs[cbuf].enabled
                                                       ? cbufs[cbuf].address
                                                       : GPUVAddr{};
-                                       }),
+                                       },
+                                       storage_buffer_alignment, index),
                                    via_header_index);
             }
             ASSERT(cbufs[desc.cbuf_index].enabled);

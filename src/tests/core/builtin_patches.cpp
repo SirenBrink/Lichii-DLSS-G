@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -18,6 +19,8 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/file_sys/patch_manager.h"
+#include "core/file_sys/ocarina_resolution.h"
+#include "core/file_sys/vfs/vfs_vector.h"
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/vfs/vfs_real.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -203,4 +206,50 @@ TEST_CASE("Built-in Max Resolution patch is listed and loaded for Ocarina's main
 
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
     REQUIRE_FALSE(builtin_enabled());
+}
+
+TEST_CASE("Ocarina output addons keep camera, display and input scale independent", "[core][ocarina]") {
+    REQUIRE(Settings::IsDockedMode());
+    const std::array<std::pair<size_t, u32>, 11> original_words{{
+        {0x3f58568, 2560}, {0x3f5856c, 1440}, {0x1202ee0, 0xd2814008},
+        {0x1202ee4, 0xf2c0b408}, {0x31f39f4, 0xd2814008}, {0x31f39f8, 0xf2c0b408},
+        {0x3e4131c, 0x3fe38e39}, {0x806418, 0xd2c00028}, {0x80641c, 0x9a888128},
+        {0x806420, 0x52a7f009}, {0x31d4014, 0x1a9f050b},
+    }};
+    std::vector<u8> original(0x3f58570);
+    for (const auto& [offset, word] : original_words) {
+        std::memcpy(original.data() + offset, &word, sizeof(word));
+    }
+    auto patched = original;
+    const auto read = [&](size_t offset) {
+        u32 value;
+        std::memcpy(&value, patched.data() + offset, sizeof(value));
+        return value;
+    };
+    FileSys::OcarinaResolutionAddon addon;
+    addon.overlay = std::make_shared<FileSys::VectorVfsDirectory>();
+    for (const auto size : std::span{FileSys::OcarinaOutputSizes}.subspan(1)) {
+        const bool tall = size.width * 10 == size.height * 16;
+        CAPTURE(size.width, size.height);
+        REQUIRE((tall || size.width * 9 == size.height * 16));
+        addon.output = size;
+        for (float scale : {1.f, 2.f / 3.f, 7.f / 12.f}) {
+            patched = original;
+            REQUIRE(addon.PatchModule(original, patched, scale));
+            REQUIRE(read(0x3f58568) == size.width);
+            REQUIRE(read(0x3f5856c) == size.height);
+            REQUIRE(read(0x1202ee0) == (0xd2800008u | (size.width << 5)));
+            REQUIRE(read(0x31f39f8) == (0xf2c00008u | (size.height << 5)));
+            REQUIRE(std::bit_cast<float>(read(0x3e4131c)) == (tall ? 16.f / 10.f : 16.f / 9.f));
+            const auto scale_bits = ((read(0x806418) >> 5) & 0xffff) |
+                                    (((read(0x806420) >> 5) & 0xffff) << 16);
+            REQUIRE(std::bit_cast<float>(scale_bits) == scale);
+        }
+    }
+    // An external patch to the camera or display must not leave a partially patched module.
+    patched = original;
+    patched[0x3e4131c] ^= 1;
+    const auto with_user_mod = patched;
+    REQUIRE_FALSE(addon.PatchModule(original, patched, 1.f));
+    REQUIRE(patched == with_user_mod);
 }

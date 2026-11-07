@@ -14,10 +14,9 @@
 
 #include "common/hex_util.h"
 #include "common/logging.h"
-#include "common/swap.h"
-#include "core/file_sys/nup_container.h"
-#include "core/file_sys/ocarina_resolution.h"
 #include "common/settings.h"
+#include "common/swap.h"
+#include "core/file_sys/ocarina_resolution.h"
 #include "core/file_sys/vfs/vfs_vector.h"
 
 namespace FileSys {

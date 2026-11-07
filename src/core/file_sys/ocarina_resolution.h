@@ -14,9 +14,10 @@ struct OutputSize {
     u32 height;
 };
 // The index is persisted in per-game configuration. Append new sizes to preserve saved choices.
-inline constexpr std::array<OutputSize, 10> OcarinaOutputSizes{{
+inline constexpr std::array<OutputSize, 12> OcarinaOutputSizes{{
     {0, 0}, {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160},
     {1280, 800}, {1920, 1200}, {2560, 1600}, {3840, 2400},
+    {1440, 900}, {1680, 1050},
 }};
 
 struct OcarinaResolutionAddon {

@@ -624,6 +624,14 @@ void TextureCache<P>::TickFrame() {
     if (out_of_memory || total_used_memory > minimum_memory) {
         RunGarbageCollector(out_of_memory);
     }
+    if (out_of_memory) {
+        // Textures left out for lack of memory are made again on their next read, once a frame
+        // while images keep failing.
+        for (size_t c : active_channel_ids) {
+            channel_storage[c].graphics_image_table.Invalidate();
+            channel_storage[c].compute_image_table.Invalidate();
+        }
+    }
     sentenced_images.Tick();
     sentenced_image_index = (sentenced_image_index + 1) % TICKS_TO_DESTROY;
     sentenced_image_bytes[sentenced_image_index] = 0;
@@ -1064,8 +1072,8 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
                 const u32 failed_before = failed_images();
                 pair->second = CreateImageView(descriptor);
                 if (pair->second == NULL_IMAGE_VIEW_ID && failed_images() != failed_before) {
-                    // No memory for its image: the collector's deletions invalidate the table, and
-                    // the descriptor's next read makes the image again.
+                    // No memory for its image: TickFrame invalidates the table after collecting,
+                    // and the descriptor's next read makes the image again.
                     channel_state->image_views.erase(pair);
                     table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
                     return NULL_IMAGE_VIEW_ID;

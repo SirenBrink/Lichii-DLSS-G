@@ -323,6 +323,26 @@ const char* TranslateCategory(Category category) {
     return "Miscellaneous";
 }
 
+float OcarinaDlssInputScale() {
+#ifdef EGLANTINE_STREAMLINE
+    if (!values.nvidia_dlss.GetValue() ||
+        values.renderer_backend.GetValue() != RendererBackend::Vulkan) {
+        return 0.f;
+    }
+    switch (values.ocarina_dlss_quality.GetValue()) {
+    case OcarinaDlssQuality::Quality:
+        return 2.f / 3.f;
+    case OcarinaDlssQuality::Balanced:
+        return 7.f / 12.f;
+    case OcarinaDlssQuality::Dlaa:
+        return 1.f;
+    default:
+        break;
+    }
+#endif
+    return 0.f;
+}
+
 void TranslateResolutionInfo(ResolutionSetup setup, ResolutionScalingInfo& info) {
     info.downscale = false;
     switch (setup) {

@@ -8,8 +8,10 @@
 
 #include <array>
 #include <atomic>
+#include <optional>
 
 #include "common/common_types.h"
+#include "video_core/renderer_vulkan/vk_ocarina_camera.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace Vulkan {
@@ -17,6 +19,8 @@ namespace Vulkan {
 class Device;
 class MemoryAllocator;
 class Scheduler;
+
+enum class DlssDepth { Forward, Reversed };
 
 class StreamlineDlssUpscaler {
 public:
@@ -26,19 +30,24 @@ public:
         VkFormat format;
         VkImageSubresourceRange range;     ///< The view's level and layer, with the view's aspect.
         VkImageAspectFlags barrier_aspect; ///< Every aspect of the image's format.
+        VkImageUsageFlags usage{VK_IMAGE_USAGE_SAMPLED_BIT};
     };
 
     struct Inputs {
         Image color;          ///< Jittered linear colour at the render size.
-        Image depth;          ///< Device depth (reversed) at the render size.
+        Image depth;          ///< Device depth at the render size.
         Image motion_vectors; ///< Motion to the previous frame at the render size.
+        std::optional<Image> frame_generation_motion;
         VkExtent2D render_size;
         VkExtent2D upscale_size;
         /// This frame's sample offset in render pixels, as the game hands its own DLSS.
         std::array<f32, 2> jitter;
         /// Turns a motion vector into render pixels (the render size for UV offsets).
         std::array<f32, 2> motion_vector_scale;
+        DlssDepth depth_direction;
+        bool ocarina_scene;
         bool reset;
+        std::optional<OcarinaCamera> camera;
     };
 
     /// Throws vk::Exception when Streamline has no DLSS for this device.
@@ -75,6 +84,15 @@ private:
     vk::ImageView output_view;
     vk::Sampler point_sampler;
     std::atomic<bool> failed{};
+    bool reported_success{};
+    std::optional<u32> fg_camera_token;
+    std::optional<OcarinaCamera> previous_fg_camera;
+    std::optional<OcarinaCamera> current_fg_camera;
+    bool reported_fg_camera{};
+    bool reported_fg_tags{};
+    bool reported_fg_failure{};
+    u32 frames_waiting_for_camera{};
+    u32 camera_gap_reports{};
 };
 
 } // namespace Vulkan

@@ -142,7 +142,7 @@ try
                             dld,
                             VK_API_VERSION_1_1,
                             render_window.GetWindowInfo().type,
-                            Settings::values.renderer_debug.GetValue()))
+                            Settings::values.renderer_debug.GetValue(), true))
     // Create debug messenger if debug is enabled
     , debug_messenger(Settings::values.renderer_debug ? CreateDebugUtilsCallback(instance)
                                                     : vk::DebugUtilsMessenger{})
@@ -199,6 +199,11 @@ try
 
     Report();
 } catch (const vk::Exception& exception) {
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::WantsDevice()) {
+        Streamline::Stop();
+    }
+#endif
     LOG_ERROR(Render_Vulkan, "Vulkan initialization failed with error: {}", exception.what());
     throw std::runtime_error{fmt::format("Vulkan initialization error {}", exception.what())};
 }
@@ -219,9 +224,18 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
     RenderAppletCaptureLayer(framebuffers);
 
     if (!render_window.IsShown()) {
+#ifdef EGLANTINE_STREAMLINE
+        if (Streamline::IsDlssGAvailable()) {
+            scheduler.WaitWorker();
+            Streamline::DisableFrameGeneration();
+        }
+#endif
         return;
     }
 
+#ifdef EGLANTINE_STREAMLINE
+    Streamline::BeginFrameGenerationRender();
+#endif
     RenderScreenshot(framebuffers);
     const auto acquiring = trace ? std::chrono::steady_clock::now()
                                  : std::chrono::steady_clock::time_point{};
@@ -230,18 +244,25 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
                                 : std::chrono::steady_clock::time_point{};
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers,
-                               render_window.GetFramebufferLayout(),
+    const auto layout = render_window.GetFramebufferLayout();
+    blit_swapchain.DrawToFrame(device, rasterizer, frame, framebuffers, layout,
                                present_manager.SwapchainImageCount(),
                                swapchain.GetImageViewFormat());
 
+    [[maybe_unused]] bool use_local_generator = true;
+#ifdef EGLANTINE_STREAMLINE
+    use_local_generator = !Streamline::IsDlssGAvailable();
+    frame->scene_rect = layout.screen;
+#endif
 #ifdef HAS_LSFG
-    void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
+    size_t generated_frames{};
+    if (use_local_generator) {
+        void(frame_gen.WantedGenerations(present_manager.MaxExtraFrames()));
 
-    frame_gen.Process(device, frame, present_manager.SwapchainImageFormat(),
-                      GuestExtent(framebuffers));
+        frame_gen.Process(device, frame, present_manager.SwapchainImageFormat(), GuestExtent(framebuffers));
+        generated_frames = frame_gen.GeneratedFrameCount();
+    }
 
-    const size_t generated_frames = frame_gen.GeneratedFrameCount();
     for (size_t generation = 0; generation < generated_frames; ++generation) {
         Frame* generated = present_manager.GetRenderFrame();
         blit_swapchain.PrepareFrame(device, generated, render_window.GetFramebufferLayout());

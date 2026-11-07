@@ -242,6 +242,12 @@ public:
         return false;
     }
 
+    virtual bool TryOcarinaDlss(const Tegra::Texture::TICEntry& color,
+                                const Tegra::Texture::TICEntry& depth,
+                                const Tegra::Texture::TICEntry& output, float detail) {
+        return false;
+    }
+
     /// Whether ProbeGameDlssOutput checks anything on this backend.
     [[nodiscard]] virtual bool CanProbeGameDlssOutput() const {
         return false;

@@ -7,6 +7,9 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 
@@ -21,6 +24,9 @@
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/renderer_vulkan/vk_ocarina_skin_capture.h"
+#endif
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_fence_manager.h"
@@ -144,6 +150,9 @@ public:
                                const Tegra::Engines::Fermi2D::Config& copy_config) override;
     bool SupportsGameDlssNetwork() const override;
     bool UsesNvidiaDlss() const override;
+    bool TryOcarinaDlss(const Tegra::Texture::TICEntry& color,
+                        const Tegra::Texture::TICEntry& depth,
+                        const Tegra::Texture::TICEntry& output, float detail) override;
     bool CanProbeGameDlssOutput() const override {
         return true;
     }
@@ -189,7 +198,7 @@ private:
     static constexpr VkDeviceSize DEFAULT_BUFFER_SIZE = 4 * sizeof(float);
 
     template <typename Func>
-    void PrepareDraw(bool is_indexed, Func&&, bool is_indirect = false);
+    void PrepareDraw(bool is_indexed, Func&&, bool is_indirect = false, u32 instances = 0);
 
     void CaptureIndirectTrace();
     void CollectIndirectTrace();
@@ -285,6 +294,23 @@ private:
 
     u32 draw_counter = 0;
     u64 render_trace_frame = 0;
+    struct {
+        GPUVAddr depth{};
+        u32 width{}, height{};
+        u64 last_frame{};
+    } ocarina_sampling;
+#ifdef EGLANTINE_STREAMLINE
+    void CaptureOcarinaCamera();
+    OcarinaSkinCapture::Binding PrepareOcarinaCapture(const std::array<u64, 6>& shaders);
+    std::unique_ptr<OcarinaSkinCapture> skin_capture;
+    OcarinaSkinCapture::Binding skin_binding;
+    u32 skin_candidate_reports{};
+    bool capture_geometry{}, skin_allocation_failed{};
+    std::optional<OcarinaCamera> ocarina_camera;
+    bool capture_fg_camera{};
+    u64 ocarina_camera_frame = ~u64{};
+    GPUVAddr ocarina_camera_buffer{};
+#endif
     u32 render_trace_draws = 0;
     u32 render_trace_clears = 0;
     bool pending_native_work{};

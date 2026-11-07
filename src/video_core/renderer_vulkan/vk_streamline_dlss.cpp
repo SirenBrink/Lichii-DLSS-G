@@ -4,17 +4,20 @@
 // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS evaluation.
 
 #include <array>
+#include <cstring>
 #include <cstdlib>
 #include <string_view>
 
 #include "common/logging.h"
 #include "video_core/dlss_evaluation.h"
+#include "video_core/ocarina_dlss_debug.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
 #include "video_core/vulkan_common/streamline.h"
 #include "video_core/vulkan_common/streamline_api.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
+#include <sl_matrix_helpers.h>
 
 namespace Vulkan {
 namespace {
@@ -72,6 +75,55 @@ sl::float4x4 Identity() {
     return matrix;
 }
 
+sl::float4x4 ViewToWorld(const OcarinaCamera& camera) {
+    const auto& v = camera.view;
+    sl::float4x4 world_to_view{};
+    for (u32 row = 0; row < 4; ++row) {
+        world_to_view.setRow(row, {v[row], v[4 + row], v[8 + row], row == 3 ? 1.f : 0.f});
+    }
+    sl::float4x4 result{};
+    sl::matrixOrthoNormalInvert(result, world_to_view);
+    return result;
+}
+
+enum class ClipSpace { Guest, Streamline };
+
+sl::float4x4 ViewToClip(const OcarinaCamera& camera, ClipSpace clip_space) {
+    // The captured projection is right-handed OpenGL. Streamline's row-vector
+    // projection must map to the normalized depth stored in the Z32 image.
+    const auto& p = camera.projection;
+    sl::float4x4 result{};
+    // NVIDIA converts a Vulkan texel's UV to (2u-1, 1-2v). The guest's
+    // effective viewport, including origin and swizzle, can use opposite axes.
+    const bool sdk = clip_space == ClipSpace::Streamline;
+    result.setRow(0, {p[0] * (sdk ? camera.viewport_sign[0] : 1.f), 0, 0, 0});
+    result.setRow(1, {0, p[5] * (sdk ? -camera.viewport_sign[1] : 1.f), 0, 0});
+    result.setRow(2, {0, 0, (p[10] - 1.f) * 0.5f, -1.f});
+    result.setRow(3, {0, 0, p[11] * 0.5f, 0});
+    return result;
+}
+
+void SetOcarinaCamera(sl::Constants& constants, const OcarinaCamera& current,
+                      const OcarinaCamera& previous, ClipSpace clip_space) {
+    const auto world = ViewToWorld(current);
+    sl::float4x4 camera_to_prev{}, clip_to_prev_camera{};
+    sl::calcCameraToPrevCamera(camera_to_prev, world, ViewToWorld(previous));
+    constants.cameraViewToClip = ViewToClip(current, clip_space);
+    sl::matrixFullInvert(constants.clipToCameraView, constants.cameraViewToClip);
+    sl::matrixMul(clip_to_prev_camera, constants.clipToCameraView, camera_to_prev);
+    sl::matrixMul(constants.clipToPrevClip, clip_to_prev_camera, ViewToClip(previous, clip_space));
+    sl::matrixFullInvert(constants.prevClipToClip, constants.clipToPrevClip);
+    constants.cameraPos = {world[3].x, world[3].y, world[3].z};
+    constants.cameraRight = {world[0].x, world[0].y, world[0].z};
+    constants.cameraUp = {world[1].x, world[1].y, world[1].z};
+    constants.cameraFwd = {-world[2].x, -world[2].y, -world[2].z};
+    const auto& p = current.projection;
+    constants.cameraNear = p[11] / (p[10] - 1.f);
+    constants.cameraFar = p[11] / (p[10] + 1.f);
+    constants.cameraFOV = 2.f * std::atan(1.f / p[5]);
+    constants.cameraAspectRatio = p[5] / p[0];
+}
+
 VkImageMemoryBarrier Barrier(const StreamlineDlssUpscaler::Image& image, VkAccessFlags src_access,
                              VkAccessFlags dst_access, VkImageLayout old_layout,
                              VkImageLayout new_layout) {
@@ -106,6 +158,16 @@ sl::Resource Resource(VkImage image, VkImageView view, VkFormat format, VkImageL
 }
 
 } // Anonymous namespace
+
+std::array<float, 16> OcarinaCamera::ClipToPrevious(const OcarinaCamera& previous) const {
+    sl::Constants constants{};
+    SetOcarinaCamera(constants, *this, previous, ClipSpace::Guest);
+    std::array<float, 16> matrix{};
+    // Streamline row vectors and GLSL column vectors use the same bytes here.
+    static_assert(sizeof(matrix) == sizeof(constants.clipToPrevClip));
+    std::memcpy(matrix.data(), &constants.clipToPrevClip, sizeof(matrix));
+    return matrix;
+}
 
 StreamlineDlssUpscaler::StreamlineDlssUpscaler(const Device& device_, Scheduler& scheduler_,
                                                MemoryAllocator& memory_allocator_)
@@ -296,6 +358,33 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                 barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT));
         };
         sl::FrameToken* frame{};
+        const bool request_fg = in.ocarina_scene && Streamline::IsDlssGAvailable();
+        if (request_fg) {
+            Streamline::BeginFrameGenerationRender();
+            frame = Streamline::GetFrameGenerationToken();
+            if (frame) {
+                // Only the last scene resolve before present can describe that real frame.
+                Streamline::MarkFrameGenerationTagged(*frame, 0, 0);
+                const u32 token = u32(*frame);
+                if (fg_camera_token != token) {
+                    previous_fg_camera = fg_camera_token && *fg_camera_token + 1u == token
+                                             ? current_fg_camera : std::nullopt;
+                    fg_camera_token = token;
+                }
+            }
+        }
+        // Repeat resolves replace this frame's candidate, but always reproject from
+        // the preceding real frame. SR commits the camera even on the initial real
+        // frame, when the motion estimator cannot yet provide guided vectors.
+        current_fg_camera.reset();
+        if (reset || !frame) {
+            previous_fg_camera.reset();
+        }
+        if (!frame) {
+            fg_camera_token.reset();
+        }
+        const bool has_fg_token = frame != nullptr;
+        const bool fg_camera_history = has_fg_token && !reset && in.camera && previous_fg_camera;
 
         constexpr VkAccessFlags WRITES =
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
@@ -311,8 +400,8 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL),
         };
 
-        // DLSS super resolution only reads the jitter, motion and depth conventions; the camera
-        // fields are for frame generation, which this doesn't use.
+        // With camera motion included in SR's flow, it doesn't need the FG camera to keep
+        // accumulating. Only an actual SR input/history discontinuity should reset SR.
         const f32 rw = static_cast<f32>(in.render_size.width);
         const f32 rh = static_cast<f32>(in.render_size.height);
         sl::Constants constants{};
@@ -333,11 +422,36 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
         constants.cameraFar = 1000.0f;
         constants.cameraFOV = 1.0f;
         constants.cameraAspectRatio = rw / rh;
-        constants.depthInverted = sl::eTrue;
+        constants.depthInverted =
+            in.depth_direction == DlssDepth::Reversed ? sl::eTrue : sl::eFalse;
         constants.cameraMotionIncluded = sl::eTrue;
         constants.motionVectors3D = sl::eFalse;
         constants.reset = reset ? sl::eTrue : sl::eFalse;
         constants.motionVectorsJittered = sl::eFalse;
+        if (request_fg && in.camera) {
+            frames_waiting_for_camera = 0;
+            SetOcarinaCamera(constants, *in.camera,
+                             fg_camera_history ? *previous_fg_camera : *in.camera,
+                             ClipSpace::Streamline);
+            // In Streamline's 1/(1-z) units the SDK's default separation (40)
+            // misses close foreground/background edges in Kokiri. A gap of 10
+            // separates Link from nearby ground without splitting his mesh.
+            constants.minRelativeLinearDepthObjectSeparation = 10.f;
+            if (!reset && !fg_camera_history && camera_gap_reports < 3) {
+                ++camera_gap_reports;
+                LOG_INFO(Render_Vulkan, "Ocarina DLSS kept SR history across a frame-generation "
+                                        "camera gap; presenting a real frame");
+            }
+            if (!reported_fg_camera) {
+                reported_fg_camera = true;
+                LOG_INFO(Render_Vulkan, "Ocarina DLSS-G matched the scene camera: vertical FOV "
+                                        "{} radians, near {}, far {}",
+                         constants.cameraFOV, constants.cameraNear, constants.cameraFar);
+            }
+        } else if (request_fg && ++frames_waiting_for_camera == 30) {
+            LOG_WARNING(Render_Vulkan, "Ocarina DLSS-G: 30 scene resolves without a matching "
+                                       "main-view camera; presenting real frames only");
+        }
 
         sl::Resource color = Resource(in.color.image, in.color.view, in.color.format,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, in.render_size,
@@ -389,6 +503,9 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                 return api_result == sl::Result::eOk;
             },
             [&] {
+                if (has_fg_token) {
+                    return true;
+                }
                 api_result = api.get_new_frame_token(frame, &index);
                 return api_result == sl::Result::eOk && frame;
             },
@@ -403,6 +520,49 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
             [&] {
                 api_result = api.evaluate_feature(sl::kFeatureDLSS, *frame, inputs, std::size(inputs),
                                                   reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
+                if (api_result == sl::Result::eOk && has_fg_token) {
+                    current_fg_camera = in.camera;
+                }
+                if (api_result == sl::Result::eOk && fg_camera_history && in.frame_generation_motion &&
+                    in.depth.range.baseMipLevel == 0 && in.depth.range.baseArrayLayer == 0 &&
+                    (in.depth.usage & in.frame_generation_motion->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+                    // Both inputs can be overwritten by the next dispatch. Streamline records
+                    // its own immutable copies here, while their read-only layouts still apply.
+                    sl::Resource fg_depth = depth;
+                    fg_depth.usage = in.depth.usage;
+                    const auto& fg = *in.frame_generation_motion;
+                    sl::Resource fg_motion = Resource(fg.image, fg.view, fg.format, VK_IMAGE_LAYOUT_GENERAL,
+                                                      in.render_size, fg.usage);
+                    cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                        Barrier(fg, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT,
+                                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL));
+                    const sl::ResourceTag fg_tags[]{
+                        {&fg_depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow,
+                         &render_area},
+                        {&fg_motion, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow,
+                         &render_area},
+                    };
+                    const auto tag = api.set_tag_for_frame(
+                        *frame, viewport, fg_tags, std::size(fg_tags),
+                        reinterpret_cast<sl::CommandBuffer*>(*cmdbuf));
+                    if (tag == sl::Result::eOk) {
+                        Streamline::MarkFrameGenerationTagged(*frame, in.upscale_size.width,
+                                                              in.upscale_size.height);
+                        if (!reported_fg_tags) {
+                            reported_fg_tags = true;
+                            LOG_INFO(Render_Vulkan, "Ocarina DLSS-G tagged scene depth and "
+                                     "camera/depth-guided motion with moving-surface search {}x{} for real frame {}",
+                                     in.render_size.width, in.render_size.height, u32(*frame));
+                        }
+                    } else {
+                        if (!reported_fg_failure) {
+                            reported_fg_failure = true;
+                            LOG_WARNING(Render_Vulkan, "Ocarina DLSS-G resource tags failed "
+                                                       "(Streamline result {})", int(tag));
+                        }
+                    }
+                }
                 return api_result == sl::Result::eOk;
             },
             [&] {
@@ -410,6 +570,17 @@ bool StreamlineDlssUpscaler::Upscale(const Inputs& in) {
                                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, output_written, {},
                                        to_general);
             });
+        if (result == VideoCommon::DlssEvaluationResult::Succeeded && in.ocarina_scene) {
+            VideoCore::Nx2Debug::ocarina_evaluations.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (result == VideoCommon::DlssEvaluationResult::Succeeded &&
+            (!reported_success || options_changed)) {
+            reported_success = true;
+            LOG_INFO(Render_Vulkan,
+                     "NVIDIA DLSS Super Resolution evaluated successfully: {}x{} -> {}x{} (mode {})",
+                     in.render_size.width, in.render_size.height, in.upscale_size.width,
+                     in.upscale_size.height, static_cast<int>(options.mode));
+        }
         if (result != VideoCommon::DlssEvaluationResult::Succeeded && !failed.exchange(true)) {
             LOG_ERROR(Render_Vulkan,
                       "NVIDIA DLSS recording failed at stage {} (Streamline result {}); using FSR 3.1",

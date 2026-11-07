@@ -1791,6 +1791,9 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     } else if (loads[IR::Attribute::BaseVertex]) {
         base_vertex = define_draw_parameter(spv::BuiltIn::BaseVertex);
     }
+    if (runtime_info.capture_clip_vertices && !vertex_index.value) {
+        vertex_index = DefineInput(*this, U32[1], true, spv::BuiltIn::VertexIndex);
+    }
     if (loads[IR::Attribute::DrawID]) {
         draw_index = define_draw_parameter(spv::BuiltIn::DrawIndex);
     }
@@ -1994,6 +1997,20 @@ void EmitContext::DefineOutputs(const IR::Program& program) {
     if (runtime_info.convert_depth_mode || info.stores.AnyComponent(IR::Attribute::PositionX) ||
         stage == Stage::VertexB) {
         output_position = DefineOutput(*this, F32[4], invocations, spv::BuiltIn::Position);
+    }
+    if (runtime_info.capture_clip_vertices) {
+        if (info.stores.AnyComponent(IR::Attribute::Generic31X)) {
+            throw NotImplementedException("Clip capture output location already used");
+        }
+        captured_vertex_index = DefineOutput(*this, U32[1], invocations);
+        Decorate(captured_vertex_index, spv::Decoration::Location, 31);
+        Decorate(captured_vertex_index, spv::Decoration::Flat);
+        for (Id id : {output_position, captured_vertex_index}) {
+            Decorate(id, spv::Decoration::XfbBuffer, 0);
+            Decorate(id, spv::Decoration::XfbStride, 32);
+        }
+        Decorate(output_position, spv::Decoration::Offset, 0);
+        Decorate(captured_vertex_index, spv::Decoration::Offset, 16);
     }
     if (info.stores[IR::Attribute::PointSize] || runtime_info.fixed_state_point_size) {
         if (stage == Stage::Fragment) {

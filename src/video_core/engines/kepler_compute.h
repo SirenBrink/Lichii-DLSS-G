@@ -332,6 +332,15 @@ private:
     std::optional<Texture::TICEntry> dlss_motion_vectors;
     std::optional<Texture::TICEntry> dlss_depth;
     u32 dlss_contract_trace_count{};
+    struct OcarinaPrefilter {
+        Texture::TICEntry scene;
+        GPUVAddr packed_address;
+    };
+    std::optional<OcarinaPrefilter> ocarina_prefilter;
+    std::optional<Texture::TICEntry> ocarina_depth;
+    u32 ocarina_depth_age{};
+    bool ocarina_resolve_seen{};
+    bool TryOcarinaUpscale(u64 key);
     GPUVAddr dlss_motion_color{};
     VideoCommon::FireEmblemUpscale::FrameJitter fe_upscale_jitter;
     bool ProcessNativeMethod(Core::System& system, u32 method, u32 argument, bool is_last_call);

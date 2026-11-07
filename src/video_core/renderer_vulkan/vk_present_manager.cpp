@@ -10,6 +10,10 @@
 #include "common/logging.h"
 #include "common/nx2_timeline.h"
 #include "common/settings.h"
+#include "common/scope_exit.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
 #ifdef HAS_LSFG
@@ -137,6 +141,13 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     , storage_supported{CanStoreToFrame(device.GetPhysical(), swapchain.GetImageFormat())}
     , use_present_thread{Settings::values.async_presentation.GetValue()}
 {
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::IsDlssGAvailable()) {
+        // Finish recording this frame's DLSS inputs before presenting, and hold the next
+        // real frame until this swapchain present has consumed the matching frame token.
+        use_present_thread = false;
+    }
+#endif
     SetImageCount();
 
     auto& dld = device.GetLogical();
@@ -780,6 +791,22 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         }
     }
 
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::IsDlssGAvailable()) {
+        const auto& r = frame->scene_rect;
+        if (swapchain.SupportsFrameGeneration() && extent.width == frame->width &&
+            extent.height == frame->height && r.right <= extent.width && r.bottom <= extent.height &&
+            r.right > r.left && r.bottom > r.top) {
+            Streamline::BeginFrameGenerationPresent(extent.width, extent.height, r.left, r.top,
+                                                    r.GetWidth(), r.GetHeight());
+            bool presented{};
+            SCOPE_EXIT { Streamline::EndFrameGenerationPresent(presented); };
+            last_present_id = swapchain.Present(render_semaphore, &presented);
+            return;
+        }
+        Streamline::DisableFrameGeneration();
+    }
+#endif
     // Present
     last_present_id = swapchain.Present(render_semaphore);
 }

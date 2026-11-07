@@ -771,7 +771,7 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
 #ifdef EGLANTINE_STREAMLINE
     if (streamline_extensions) {
         streamline_attached =
-            Streamline::AttachDevice(instance, physical, *logical, graphics_family, dld);
+            Streamline::AttachDevice(instance, physical, *logical, graphics_family, present_family, dld);
     } else if (Streamline::WantsDevice()) {
         Streamline::Stop();
     }

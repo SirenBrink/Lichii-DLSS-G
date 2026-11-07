@@ -386,6 +386,10 @@ struct Values {
                                                        true};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
+    SwitchableSetting<OcarinaDlssQuality> ocarina_dlss_quality{
+        linkage, OcarinaDlssQuality::Auto, "ocarina_dlss_quality", Category::Renderer};
+    SwitchableSetting<bool> ocarina_dlss_frame_generation{
+        linkage, false, "ocarina_dlss_frame_generation", Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
                                                       AspectRatio::R16_9,
                                                       "aspect_ratio",
@@ -1027,6 +1031,7 @@ std::string GetTimeZoneString(TimeZone time_zone);
 
 void LogSettings();
 
+[[nodiscard]] float OcarinaDlssInputScale();
 void TranslateResolutionInfo(ResolutionSetup setup, ResolutionScalingInfo& info);
 void UpdateRescalingInfo();
 

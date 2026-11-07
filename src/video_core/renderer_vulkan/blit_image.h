@@ -96,7 +96,7 @@ public:
     /// RCAS (temporal_sharpen.frag) of source into dst_framebuffer; sharpness in stops as
     /// FsrRcasCon takes it (0 is the strongest).
     void TemporalSharpen(const Framebuffer* dst_framebuffer, VkImageView source,
-                         const Region2D& dst_region, f32 sharpness);
+                         const Region2D& dst_region, f32 sharpness, float ocarina_detail = 0.f);
 
     void BlitColorMSAA(const Framebuffer* dst_framebuffer, const ImageView& src_image_view,
                        const Region2D& dst_region, const Region2D& src_region);

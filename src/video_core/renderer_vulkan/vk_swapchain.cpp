@@ -16,6 +16,9 @@
 #include "common/logging.h"
 #include "common/settings.h"
 #include "common/settings_enums.h"
+#ifdef EGLANTINE_STREAMLINE
+#include "video_core/vulkan_common/streamline.h"
+#endif
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
@@ -43,6 +46,16 @@ VkSurfaceFormatKHR ChooseSwapSurfaceFormat(vk::Span<VkSurfaceFormatKHR> formats)
 
 static VkPresentModeKHR ChooseSwapPresentMode(bool has_imm, bool has_mailbox,
                                               bool has_fifo_relaxed) {
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::IsDlssGAvailable()) {
+        if (has_imm) {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+        if (has_mailbox) {
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+    }
+#endif
     // Mailbox doesn't lock the application like FIFO (vsync)
     // FIFO present mode locks the framerate to the monitor's refresh rate
     Settings::VSyncMode setting = [has_imm, has_mailbox]() {
@@ -130,7 +143,13 @@ Swapchain::Swapchain(
     Create(surface, width_, height_);
 }
 
-Swapchain::~Swapchain() = default;
+Swapchain::~Swapchain() {
+#ifdef EGLANTINE_STREAMLINE
+    if (Streamline::IsDlssGAvailable()) {
+        Streamline::DisableFrameGeneration();
+    }
+#endif
+}
 
 void Swapchain::Create(
     VkSurfaceKHR_T* surface_,
@@ -152,6 +171,11 @@ void Swapchain::Create(
     // Submitted work may still wait on the old acquire/present semaphores; destroying them under
     // it loses the device on MoltenVK (window moved to a display with a different scale).
     if (swapchain) {
+#ifdef EGLANTINE_STREAMLINE
+        if (Streamline::IsDlssGAvailable()) {
+            Streamline::DisableFrameGeneration();
+        }
+#endif
         std::scoped_lock lock{scheduler.submit_mutex};
         const VkResult result = device.GetLogical().WaitIdle();
         if (result == VK_ERROR_DEVICE_LOST) {
@@ -230,7 +254,7 @@ bool Swapchain::AcquireNextImage(bool may_flush) {
     return false;
 }
 
-u64 Swapchain::Present(VkSemaphore render_semaphore) {
+u64 Swapchain::Present(VkSemaphore render_semaphore, bool* succeeded) {
     const auto present_queue{device.GetPresentQueue()};
     // Ids for vkWaitForPresentKHR (the host frame pacer). They only have to increase per
     // swapchain, so one counter serves every swapchain this object creates.
@@ -274,6 +298,9 @@ u64 Swapchain::Present(VkSemaphore render_semaphore) {
     ++frame_index;
     if (frame_index >= image_count) {
         frame_index = 0;
+    }
+    if (succeeded) {
+        *succeeded = queued;
     }
     return queued ? present_id : 0;
 }

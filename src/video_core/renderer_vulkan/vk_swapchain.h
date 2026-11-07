@@ -43,7 +43,7 @@ public:
 
     /// Presents the rendered image to the swapchain. Returns its present id for
     /// vkWaitForPresentKHR, or 0 (no present wait support, or the present failed).
-    u64 Present(VkSemaphore render_semaphore);
+    u64 Present(VkSemaphore render_semaphore, bool* succeeded = nullptr);
 
     VkSwapchainKHR Handle() const {
         return *swapchain;
@@ -122,6 +122,10 @@ public:
 
     VkExtent2D GetExtent() const {
         return extent;
+    }
+
+    bool SupportsFrameGeneration() const {
+        return present_mode == VK_PRESENT_MODE_IMMEDIATE_KHR || present_mode == VK_PRESENT_MODE_MAILBOX_KHR;
     }
 
 private:

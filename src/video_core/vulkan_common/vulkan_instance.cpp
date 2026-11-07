@@ -135,7 +135,7 @@ void RemoveUnavailableLayers(const vk::InstanceDispatch& dld, std::vector<const 
 
 vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceDispatch& dld,
                             u32 required_version, Core::Frontend::WindowSystemType window_type,
-                            bool enable_validation) {
+                            bool enable_validation, bool rendering_instance) {
     if (!library.IsOpen()) {
         LOG_ERROR(Render_Vulkan, "Vulkan library not available");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
@@ -144,6 +144,13 @@ vk::Instance CreateInstance(const Common::DynamicLibrary& library, vk::InstanceD
         LOG_ERROR(Render_Vulkan, "vkGetInstanceProcAddr not present in Vulkan");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
     }
+#ifdef EGLANTINE_STREAMLINE
+    if (rendering_instance) {
+        if (const auto proxy = Streamline::FrameGenerationInstanceLoader()) {
+            dld.vkGetInstanceProcAddr = proxy;
+        }
+    }
+#endif
     if (!vk::Load(dld)) {
         LOG_ERROR(Render_Vulkan, "Failed to load Vulkan function pointers");
         throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);

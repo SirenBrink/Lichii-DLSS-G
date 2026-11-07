@@ -143,6 +143,9 @@ void EmitPrologue(EmitContext& ctx) {
 }
 
 void EmitEpilogue(EmitContext& ctx) {
+    if (ctx.runtime_info.capture_clip_vertices) {
+        ctx.OpStore(ctx.captured_vertex_index, ctx.OpLoad(ctx.U32[1], ctx.vertex_index));
+    }
     if (ctx.stage == Stage::Task || ctx.stage == Stage::Mesh) {
         EmitMeshEpilogue(ctx);
         return;

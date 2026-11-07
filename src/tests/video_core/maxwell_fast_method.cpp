@@ -42,6 +42,12 @@ struct GpuSplitTestAccess {
         return split.write_position;
     }
 
+    static void Start(GpuSplit& split, Core::System& system) {
+        Initialize(split, system);
+        split.active = true;
+        split.back_thread = std::jthread([&split](std::stop_token stop) { split.BackLoop(stop); });
+    }
+
     static u64 NearWrap() {
         return GpuSplit::RingWords - 1;
     }

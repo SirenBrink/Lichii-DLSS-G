@@ -128,6 +128,13 @@ public:
     [[nodiscard]] static bool OnBackThread() {
         return on_back_thread;
     }
+    static void MarkGpuThread() {
+        on_gpu_thread = true;
+    }
+    /// With the split disabled, the GPU command thread owns recording and submission.
+    [[nodiscard]] static bool OwnsScheduler() {
+        return Get().BackRunning() ? on_back_thread : on_gpu_thread;
+    }
     /// Called on the back before it sleeps waiting for work (the rasterizer submits deferred work).
     void SetIdleHook(void (*hook)(void*), void* argument) {
         idle_hook = hook;
@@ -601,10 +608,13 @@ private:
 
     static GpuSplit instance;
     static inline thread_local bool on_back_thread{};
+    static inline thread_local bool on_gpu_thread{};
     void (*idle_hook)(void*){};
     void* idle_argument{};
     alignas(64) std::atomic<bool> hook_requested{};
     std::atomic<bool> back_running{};
+    // Cleared before consuming an entry and published after its deferred idle submission.
+    std::atomic<bool> back_quiet{true};
 
     // 128 bytes: x86 spatial prefetchers pull 64-byte lines in pairs. back_waiting and wake are
     // always touched together by both threads, so they share a block.

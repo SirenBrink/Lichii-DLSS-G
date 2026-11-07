@@ -19,6 +19,7 @@
 
 #include "common/alignment.h"
 #include "shader_recompiler/environment.h"
+#include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ir/basic_block.h"
 #include "shader_recompiler/frontend/ir/breadth_first_search.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -95,6 +96,9 @@ struct StorageInfo {
     bool tables_seen{};
     size_t table_budget{};
     size_t table_used{};
+    /// The storage buffers the pass without table entries bound; bound again, they take nothing
+    /// from table_budget, which they were left out of.
+    StorageBufferSet counted;
     small_vector<StorageBufferAddr, 8> table_candidates;
 };
 
@@ -1387,11 +1391,13 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info, 
                     info.table_candidates.end()) {
                     const StorageBufferAddr holder{.index = candidate.index,
                                                    .offset = candidate.offset};
+                    const auto takes_binding = [&info](const StorageBufferAddr& buffer) {
+                        return info.set.find(buffer) == info.set.end() &&
+                               !info.counted.contains(buffer);
+                    };
                     const size_t added{
-                        (info.set.find(candidate) == info.set.end() ? 1U : 0U) +
-                        (candidate.indirect != ~0U && info.set.find(holder) == info.set.end()
-                             ? 1U
-                             : 0U)};
+                        (takes_binding(candidate) ? 1U : 0U) +
+                        (candidate.indirect != ~0U && takes_binding(holder) ? 1U : 0U)};
                     if (info.table_used + added > info.table_budget) {
                         continue;
                     }
@@ -1608,6 +1614,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     if (!has_global_memory) {
         return;
     }
+    const size_t max_ssbos{StorageBufferLimit(host_info)};
     TrackingConditions conditions{program};
     StorageInfo info;
     // Without 64-bit integers the backend cannot route global accesses among bound buffers.
@@ -1626,7 +1633,7 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         }
     };
     collect();
-    if (info.competing_loaded_bound && info.set.size() > Info::MAX_SSBOS) {
+    if (info.competing_loaded_bound && info.set.size() > max_ssbos) {
         // Not enough bindings for the loaded pointers that compete with paired ones: keep the
         // pairs, as if no loaded pointer competed.
         StorageInfo paired;
@@ -1636,16 +1643,26 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
         info = std::move(paired);
         collect();
     }
-    if (info.tables_seen && info.set.size() < Info::MAX_SSBOS) {
+    if (info.tables_seen && info.set.size() < max_ssbos) {
         // Again with pointer table entries, in the bindings the first pass left free.
         StorageInfo with_tables;
-        with_tables.iterator_words = std::move(info.iterator_words);
-        with_tables.atomic_pointers = std::move(info.atomic_pointers);
+        with_tables.iterator_words = info.iterator_words;
+        with_tables.atomic_pointers = info.atomic_pointers;
         with_tables.bind_competing_loaded = info.bind_competing_loaded;
         with_tables.tables_enabled = true;
-        with_tables.table_budget = Info::MAX_SSBOS - info.set.size();
-        info = std::move(with_tables);
+        with_tables.table_budget = max_ssbos - info.set.size();
+        with_tables.counted = info.set;
+        std::swap(info, with_tables);
         collect();
+        if (info.set.size() > max_ssbos) {
+            // Never more storage buffers than a stage binds: without the table entries, then.
+            info = std::move(with_tables);
+        }
+    }
+    if (info.set.size() > max_ssbos) {
+        // Binding only some of them would drop the accesses through the others.
+        throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
+                                      info.set.size(), max_ssbos);
     }
     program.info.native_global_bounds |= info.native_runtime_bounds;
     for (const StorageBufferAddr& storage_buffer : info.set) {
@@ -1669,10 +1686,22 @@ void GlobalMemoryToStorageBufferPass(Environment& env, IR::Program& program,
     }
 }
 
-void JoinStorageInfo(Info& base, Info& source) {
+size_t StorageBufferLimit(const HostTranslateInfo& host_info) {
+    size_t limit{Info::MAX_SSBOS};
+    for (const u32 device_limit : {host_info.max_per_stage_descriptor_storage_buffers,
+                                   host_info.max_descriptor_set_storage_buffers}) {
+        if (device_limit != 0) {
+            limit = (std::min)(limit, size_t{device_limit});
+        }
+    }
+    return limit;
+}
+
+std::vector<u32> JoinStorageInfo(Info& base, Info& source, size_t limit) {
     base.requires_coherent_global_memory |= source.requires_coherent_global_memory;
     base.native_global_bounds |= source.native_global_bounds;
     auto& descriptors = base.storage_buffers_descriptors;
+    std::vector<u32> bindings;
     for (auto& desc : source.storage_buffers_descriptors) {
         auto it{std::ranges::find_if(descriptors, [&desc](const auto& existing) {
             return desc.cbuf_index == existing.cbuf_index &&
@@ -1681,9 +1710,84 @@ void JoinStorageInfo(Info& base, Info& source) {
         })};
         if (it != descriptors.end()) {
             it->is_written |= desc.is_written;
+            bindings.push_back(static_cast<u32>(it - descriptors.begin()));
             continue;
         }
+        if (descriptors.size() >= limit) {
+            throw NotImplementedException("Binding {} storage buffers to a stage that binds {}",
+                                          descriptors.size() + 1, limit);
+        }
+        bindings.push_back(static_cast<u32>(descriptors.size()));
         descriptors.push_back(desc);
+    }
+    return bindings;
+}
+
+void RemapStorageBindings(IR::Program& program, std::span<const u32> bindings) {
+    for (IR::Block* const block : program.post_order_blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            // Each takes the binding as its first argument (see GlobalToStorage and Replace).
+            switch (inst.GetOpcode()) {
+            case IR::Opcode::LoadStorageU8:
+            case IR::Opcode::LoadStorageS8:
+            case IR::Opcode::LoadStorageU16:
+            case IR::Opcode::LoadStorageS16:
+            case IR::Opcode::LoadStorage32:
+            case IR::Opcode::LoadStorage64:
+            case IR::Opcode::LoadStorage128:
+            case IR::Opcode::WriteStorageU8:
+            case IR::Opcode::WriteStorageS8:
+            case IR::Opcode::WriteStorageU16:
+            case IR::Opcode::WriteStorageS16:
+            case IR::Opcode::WriteStorage32:
+            case IR::Opcode::WriteStorage64:
+            case IR::Opcode::WriteStorage128:
+            case IR::Opcode::StorageAtomicIAdd32:
+            case IR::Opcode::StorageAtomicSMin32:
+            case IR::Opcode::StorageAtomicUMin32:
+            case IR::Opcode::StorageAtomicSMax32:
+            case IR::Opcode::StorageAtomicUMax32:
+            case IR::Opcode::StorageAtomicInc32:
+            case IR::Opcode::StorageAtomicDec32:
+            case IR::Opcode::StorageAtomicAnd32:
+            case IR::Opcode::StorageAtomicOr32:
+            case IR::Opcode::StorageAtomicXor32:
+            case IR::Opcode::StorageAtomicExchange32:
+            case IR::Opcode::StorageAtomicCompareExchange32:
+            case IR::Opcode::StorageAtomicIAdd64:
+            case IR::Opcode::StorageAtomicSMin64:
+            case IR::Opcode::StorageAtomicUMin64:
+            case IR::Opcode::StorageAtomicSMax64:
+            case IR::Opcode::StorageAtomicUMax64:
+            case IR::Opcode::StorageAtomicAnd64:
+            case IR::Opcode::StorageAtomicOr64:
+            case IR::Opcode::StorageAtomicXor64:
+            case IR::Opcode::StorageAtomicExchange64:
+            case IR::Opcode::StorageAtomicIAdd32x2:
+            case IR::Opcode::StorageAtomicSMin32x2:
+            case IR::Opcode::StorageAtomicUMin32x2:
+            case IR::Opcode::StorageAtomicSMax32x2:
+            case IR::Opcode::StorageAtomicUMax32x2:
+            case IR::Opcode::StorageAtomicAnd32x2:
+            case IR::Opcode::StorageAtomicOr32x2:
+            case IR::Opcode::StorageAtomicXor32x2:
+            case IR::Opcode::StorageAtomicExchange32x2:
+            case IR::Opcode::StorageAtomicAddF32:
+            case IR::Opcode::StorageAtomicAddF16x2:
+            case IR::Opcode::StorageAtomicAddF32x2:
+            case IR::Opcode::StorageAtomicMinF16x2:
+            case IR::Opcode::StorageAtomicMinF32x2:
+            case IR::Opcode::StorageAtomicMaxF16x2:
+            case IR::Opcode::StorageAtomicMaxF32x2:
+                break;
+            default:
+                continue;
+            }
+            const IR::Value binding{inst.Arg(0)};
+            if (binding.IsImmediate() && binding.U32() < bindings.size()) {
+                inst.SetArg(0, IR::Value{bindings[binding.U32()]});
+            }
+        }
     }
 }
 

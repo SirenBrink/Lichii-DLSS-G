@@ -1054,11 +1054,16 @@ ImageViewId TextureCache<P>::VisitImageView(u32 index, bool compute) {
         if (IsValidEntry(*gpu_memory, descriptor)) {
             const auto [pair, is_new_tc] = channel_state->image_views.try_emplace(descriptor);
             if (is_new_tc) {
-                pair->second = CreateImageView(descriptor);
-                if (pair->second != NULL_IMAGE_VIEW_ID) {
-                    image_view_descriptors[pair->second].emplace_back(current_channel_id,
-                                                                      descriptor);
+                const ImageViewId image_view_id = CreateImageView(descriptor);
+                if (image_view_id == NULL_IMAGE_VIEW_ID) {
+                    // Out of memory: read the descriptor again next time to retry the image.
+                    channel_state->image_views.erase(pair);
+                    table.Invalidate();
+                    table.bound_ids[index] = NULL_IMAGE_VIEW_ID;
+                    return NULL_IMAGE_VIEW_ID;
                 }
+                pair->second = image_view_id;
+                image_view_descriptors[image_view_id].emplace_back(current_channel_id, descriptor);
             }
             PrepareImageView(pair->second, false, false);
             table.bound_ids[index] = pair->second;

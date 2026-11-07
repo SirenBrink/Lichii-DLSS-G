@@ -1275,48 +1275,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         LOG_ERROR(Common_Filesystem, "Failed to create pipeline cache directories");
         return;
     }
-    // This fork's files: its records carry task/mesh state other builds of the same cache version
-    // cannot read, and their loader deletes a file it fails to read. The shared files of earlier
-    // builds are copied once.
+    // Community pipeline keys include the expanded storage bindings and cooperative HMMA.
+    // Older pipeline records cannot be relabelled to this format.
     pipeline_cache_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-frizti", CACHE_VERSION);
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan-community", CACHE_VERSION);
     used_pipelines_filename =
-        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-frizti", CACHE_VERSION);
-    for (const auto& [shared, own] :
-         {std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan", CACHE_VERSION),
-                    pipeline_cache_filename},
-          std::pair{VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used", CACHE_VERSION),
-                    used_pipelines_filename}}) {
-        std::error_code error;
-        if (!std::filesystem::exists(own, error) && std::filesystem::exists(shared, error)) {
-            std::filesystem::copy_file(shared, own, error);
-            LOG_INFO(Render_Vulkan, "Copied pipeline cache {} to {}{}",
-                     Common::FS::PathToUTF8String(shared), Common::FS::PathToUTF8String(own),
-                     error ? fmt::format(" (failed: {})", error.message()) : std::string{});
-        }
-    }
-    // zortos293/Lichii builds from #194 on (cache version 53) write the same records as this
-    // build under another version number: with no cache of this version, copy theirs and
-    // relabel the copy. Their files stay as they are.
-    if (std::error_code error; !std::filesystem::exists(pipeline_cache_filename, error)) {
-        constexpr u32 ZortosCacheVersion = 53;
-        constexpr std::array<char, 8> PipelineCacheMagic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
-        const auto zortos = VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan",
-                                                                    ZortosCacheVersion);
-        if (VideoCommon::CopyCompatiblePipelineCache(zortos, pipeline_cache_filename,
-                                                     PipelineCacheMagic, ZortosCacheVersion,
-                                                     CACHE_VERSION)) {
-            LOG_INFO(Render_Vulkan, "Copied cache version {} pipeline cache {} to {}",
-                     ZortosCacheVersion, Common::FS::PathToUTF8String(zortos),
-                     Common::FS::PathToUTF8String(pipeline_cache_filename));
-            const auto zortos_used = VideoCommon::VersionedPipelineCachePath(
-                base_dir, "vulkan_used", ZortosCacheVersion);
-            if (!std::filesystem::exists(used_pipelines_filename, error) &&
-                std::filesystem::exists(zortos_used, error)) {
-                std::filesystem::copy_file(zortos_used, used_pipelines_filename, error);
-            }
-        }
-    }
+        VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_used-community", CACHE_VERSION);
     used_pipelines = LoadUsedPipelines(used_pipelines_filename, MaxUsedPipelineAge(device));
     used_pipelines_saved = std::chrono::steady_clock::now();
     size_t skipped_pipelines = 0;
@@ -1325,7 +1289,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
 
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
-            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines", CACHE_VERSION);
+            VideoCommon::VersionedPipelineCachePath(base_dir, "vulkan_pipelines-community", CACHE_VERSION);
         vulkan_pipeline_cache =
             LoadVulkanPipelineCache(vulkan_pipeline_cache_filename, CACHE_VERSION);
     }

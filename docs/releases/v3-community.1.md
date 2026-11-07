@@ -28,6 +28,12 @@ The 16:10 presets change the guest display targets and camera aspect. Menus, mov
 
 Guest alignment can round the input at other sizes. The log reports the dimensions actually evaluated. The frame-generation log reports the **measured** ratio of NVIDIA-reported displayed frames to real presents across a consecutive sample. A requested multiplier, an SR evaluation and an increased FPS counter each measure different things. The Kokiri stair shimmer remains a known visual issue.
 
+## Verification and known behavior
+
+On an RTX 5070 Ti in the Ocarina gameplay test, the release-candidate renderer evaluated Balanced at 2240×1260 to 3840×2160. NVIDIA reported 480 displayed frames over 120 real presents in four consecutive samples. Earlier samples measured 1.23× and 3.90×. Displayed FPS still depends on real FPS, focus, refresh rate and pacing. An offscreen synthetic test on the same GPU performed genuine SR but measured 1.00× frame generation.
+
+All eleven output presets were checked with the supported game assets; all 44 docked preset/quality combinations passed the patch tests. The handheld profile retained its original dimensions in all eleven cases. Gameplay verification covered the 4K Balanced configuration. GPU Unswizzle is off by default. A tester reported HUD corruption with it enabled.
+
 ## Community changes and provenance
 
 The source survey covered public branches and pull requests in the Lichii and Eglantine fork networks on November 7, 2026. The reviewed primary tips were [Lichii 222877d](https://github.com/zortos293/Lichii/commit/222877d4f7c8945b2f31a87b76d09f0a92e4f1b8) and [Eglantine 0857e8b](https://github.com/Djihads80/Eglantine/commit/0857e8b4a792ac99b87af6bb6f329127aa7df683). This branch carries compatible changes from those histories and selected fork PRs. Overlapping experimental schedulers, driver-specific visual bypasses and third-party shader-pack imports were left out.

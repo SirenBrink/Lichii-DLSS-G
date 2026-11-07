@@ -192,7 +192,7 @@ struct System::Impl {
 
     u64 program_id;
 
-    bool Initialize(System& system) {
+    void AllocateDeviceMemory() {
         try {
             device_memory.emplace();
         } catch (const std::bad_alloc&) {
@@ -201,6 +201,10 @@ struct System::Impl {
         if (device_memory && !device_memory->buffer.BackingBasePointer()) {
             device_memory.reset();
         }
+    }
+
+    bool Initialize(System& system) {
+        AllocateDeviceMemory();
 
         is_multicore = Settings::values.use_multi_core.GetValue();
         memory_layout = Settings::values.memory_layout_mode.GetValue();
@@ -229,11 +233,14 @@ struct System::Impl {
 
     void ReinitializeIfNecessary(System& system) {
         const bool must_reinitialize =
-            !device_memory.has_value() ||
             is_multicore != Settings::values.use_multi_core.GetValue() ||
             memory_layout != Settings::values.memory_layout_mode.GetValue();
 
         if (!must_reinitialize) {
+            // A previous Switch 2 shutdown releases the backing. Restore it without restarting timing.
+            if (!device_memory) {
+                AllocateDeviceMemory();
+            }
             return;
         }
 
@@ -346,12 +353,6 @@ struct System::Impl {
 
     SystemResultStatus InitializeKernel(System& system) {
         LOG_DEBUG(Core, "initialized OK");
-
-        // ShutdownMainProcess releases it after a Switch 2 game; create it before the check below
-        // so an empty slot alone does not rerun the full Initialize.
-        if (!device_memory.has_value()) {
-            device_memory.emplace();
-        }
 
         // Setting changes may require a full system reinitialization (e.g., disabling multicore).
         ReinitializeIfNecessary(system);

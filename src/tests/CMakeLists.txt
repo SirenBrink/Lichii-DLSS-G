@@ -167,6 +167,11 @@ add_executable(tests
 
 create_target_directory_groups(tests)
 
+if (MSVC)
+    # Combined Maxwell front/back fixtures can exceed the Windows default 1 MiB stack.
+    target_link_options(tests PRIVATE "/STACK:8388608")
+endif()
+
 target_link_libraries(tests PRIVATE common core audio_core input_common video_core)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} Catch2::Catch2WithMain Threads::Threads)
 

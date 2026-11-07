@@ -13,7 +13,11 @@ namespace Host1x {
 
 SyncpointManager::ActionHandle SyncpointManager::RegisterAction(
     std::atomic<u32>& syncpoint, std::list<RegisteredAction>& action_storage, u32 expected_value,
-    std::function<void()>&& action) {
+    std::function<void()> action) {
+    if (!action) {
+        LOG_WARNING(HW_GPU, "SyncpointManager: rejecting empty action (value {})", expected_value);
+        return {};
+    }
     if (syncpoint.load(std::memory_order_acquire) >= expected_value) {
         action();
         return {};
@@ -90,7 +94,12 @@ void SyncpointManager::Increment(std::atomic<u32>& syncpoint, std::condition_var
         if (it->expected_value > new_value) {
             break;
         }
-        it->action();
+        if (it->action) {
+            it->action();
+        } else {
+            LOG_WARNING(HW_GPU, "SyncpointManager: skipping empty action (value {})",
+                        it->expected_value);
+        }
         it = action_storage.erase(it);
     }
     wait_cv.notify_all();

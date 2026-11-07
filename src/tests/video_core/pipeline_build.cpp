@@ -34,6 +34,7 @@ TEST_CASE("Production pipeline build holds a draw without blocking its producer"
                         }};
     entered.get_future().wait();
     const bool building = !build.IsBuilt();
+    const bool timed_out = !build.WaitFor(std::chrono::microseconds{100});
     const bool saturated = !budget.TryAcquire(true, true);
     auto draw = std::async(std::launch::async, [&] { build.Wait(); });
     const bool held = Pending(draw);
@@ -42,6 +43,8 @@ TEST_CASE("Production pipeline build holds a draw without blocking its producer"
     release.set_value();
     draw.get();
     REQUIRE(building);
+    REQUIRE(timed_out);
+    REQUIRE(build.WaitFor(std::chrono::microseconds{0}));
     REQUIRE(saturated);
     REQUIRE(held);
     REQUIRE(producer_progress == 1);

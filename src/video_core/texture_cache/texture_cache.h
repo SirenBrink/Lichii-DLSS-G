@@ -135,15 +135,16 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 }
 
 template <class P>
-void TextureCache<P>::RunGarbageCollector() {
+void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     bool high_priority_mode = false;
     bool aggressive_mode = false;
     bool evict_old_costly = false;
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
     const auto Configure = [&](bool allow_aggressive) {
-        high_priority_mode = total_used_memory >= expected_memory;
-        aggressive_mode = allow_aggressive && total_used_memory >= critical_memory;
+        high_priority_mode = out_of_memory || total_used_memory >= expected_memory;
+        aggressive_mode =
+            allow_aggressive && (out_of_memory || total_used_memory >= critical_memory);
         ticks_to_destroy = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
         // EDEN_NX2_TC_MIN_AGE=<frames>: never evict images used more recently (thrash tests).
         static const u64 min_age = [] {
@@ -154,7 +155,7 @@ void TextureCache<P>::RunGarbageCollector() {
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
-                          &evict_old_costly](ImageId image_id) {
+                          &evict_old_costly, out_of_memory](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
         }
@@ -187,6 +188,9 @@ void TextureCache<P>::RunGarbageCollector() {
         ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
         UnregisterImage(image_id);
         DeleteImage(image_id, image.scale_tick > frame_tick + 5);
+        if (out_of_memory) {
+            return false;
+        }
         if (aggressive_mode && total_used_memory < critical_memory) {
             num_iterations >>= 2;
             aggressive_mode = false;
@@ -258,7 +262,7 @@ void TextureCache<P>::RunGarbageCollector() {
         evict_old_costly = false;
     }
     Collect();
-    if (total_used_memory >= critical_memory) {
+    if (out_of_memory || total_used_memory >= critical_memory) {
         Configure(true);
         Collect();
     }
@@ -609,8 +613,16 @@ void TextureCache<P>::TickFrame() {
         gc_deletes = gc_costly_deletes = gc_download_deletes = async_decodes_queued = 0;
         images_created = images_deleted = 0;
     }
-    if (total_used_memory > minimum_memory) {
-        RunGarbageCollector();
+    // An image that could not be made at all: the driver is out of memory whatever the counts
+    // say, so collect as at the critical threshold.
+    bool out_of_memory = false;
+    if constexpr (requires { runtime.FailedImages(); }) {
+        const u32 failed = runtime.FailedImages();
+        out_of_memory = failed != seen_failed_images;
+        seen_failed_images = failed;
+    }
+    if (out_of_memory || total_used_memory > minimum_memory) {
+        RunGarbageCollector(out_of_memory);
     }
     sentenced_images.Tick();
     sentenced_image_index = (sentenced_image_index + 1) % TICKS_TO_DESTROY;
@@ -2733,6 +2745,9 @@ ImageId TextureCache<P>::InsertImage(const ImageInfo& info, GPUVAddr gpu_addr,
                  static_cast<u32>(info.format), info.block.width, info.block.height, info.block.depth);
     }
     const ImageId image_id = JoinImages(storage_info, gpu_addr, *cpu_addr);
+    if (!image_id) {
+        return image_id;
+    }
     const Image& image = slot_images[image_id];
     // Using "image.gpu_addr" instead of "gpu_addr" is important because it might be different
     const auto [it, is_new] = image_allocs_table.try_emplace(image.gpu_addr);
@@ -2855,6 +2870,20 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
     }
     const ImageId new_image_id = slot_images.insert(runtime, new_info, gpu_addr, cpu_addr);
+    if constexpr (requires(const Image& image) { image.OutOfMemory(); }) {
+        if (slot_images[new_image_id].OutOfMemory()) {
+            // Left out of the cache: lookups see no image (a null view) and make it again once
+            // the collector has freed memory.
+            slot_images.erase(new_image_id);
+            static u32 logged{};
+            if (logged++ < 32) {
+                LOG_ERROR(HW_GPU, "No memory for the {}x{}x{} image at {:#x} (format {}); skipping it",
+                          new_info.size.width, new_info.size.height, new_info.size.depth, gpu_addr,
+                          static_cast<u32>(new_info.format));
+            }
+            return ImageId{};
+        }
+    }
     Image& new_image = slot_images[new_image_id];
 
     new_image.allocation_tick = frame_tick;
@@ -3098,6 +3127,9 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
             dst_id = InsertImage(dst_info, dst_addr, RelaxedOptions{});
         }
     } while (has_deleted_images);
+    if (!src_id || !dst_id) {
+        return std::nullopt;
+    }
     const ImageBase& src_image = slot_images[src_id];
     const ImageBase& dst_image = slot_images[dst_id];
     const bool native_bgr = runtime.HasNativeBgr();
@@ -3113,6 +3145,9 @@ std::optional<typename TextureCache<P>::BlitImages> TextureCache<P>::GetBlitImag
             src_id = FindOrInsertImage(src_info, src_addr, RelaxedOptions{});
             dst_id = FindOrInsertImage(dst_info, dst_addr, RelaxedOptions{});
         } while (has_deleted_images);
+        if (!src_id || !dst_id) {
+            return std::nullopt;
+        }
     }
     return {BlitImages{
         .dst_id = dst_id,
